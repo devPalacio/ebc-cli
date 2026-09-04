@@ -8,6 +8,12 @@ from pathlib import Path
 
 from .csvlog import StatusCsvLogger
 from .device import DeviceError, EbcDevice
+from .profiles import (
+    TesterProfile,
+    make_capacity_test_profile,
+    make_float_charge_profile,
+    make_recovery_profile,
+)
 from .protocol import EbcStatus, make_lead_acid_charge_plan
 from .session import SupervisedSession, run_active_session
 
@@ -42,122 +48,79 @@ def handle_plan_lead_acid_charge(args: argparse.Namespace) -> int:
 
 
 def handle_recover_lead_acid(args: argparse.Namespace) -> int:
-    if not args.execute or not args.i_am_present:
-        raise DeviceError("recovery requires both --execute and --i-am-present")
-    if not 0.01 <= args.current <= 0.20:
-        raise DeviceError("recovery current must be between 0.01 and 0.20 A")
-    if not 1 <= args.timeout_minutes <= 30:
-        raise DeviceError("recovery timeout must be between 1 and 30 minutes")
-    log_context, log_path = _command_log_context(args)
-    with (
-        EbcDevice(args.device, args.timeout) as tester,
-        log_context as logger,
-        SupervisedSession(tester, logger) as session,
-    ):
-        baseline = tester.begin_lead_acid_recovery(
-            current_amps=args.current, timeout_minutes=args.timeout_minutes
-        )
-        if logger is not None:
-            logger.write(baseline, event="recovery-baseline")
-        session.mark_started("recovery-started")
-        print(
-            "Recovery started: PbAc, 6 cells, 14.4 V target, "
-            f"{args.current:.2f} A, {args.timeout_minutes}-minute hard timeout"
-        )
-        print("Baseline: ", end="")
-        print_status(baseline)
-        run_active_session(
-            session=session,
-            tester=tester,
-            logger=logger,
-            printer=print_status,
-            timeout_minutes=args.timeout_minutes,
-            sample_event="recovery-sample",
-        )
-    _report_log(log_path)
-    return 0
+    _require_supervised_execution(args, "recovery")
+    profile = make_recovery_profile(
+        current_amps=args.current,
+        timeout_minutes=args.timeout_minutes,
+    )
+    return _run_profile(args, profile)
 
 
 def handle_float_charge(args: argparse.Namespace) -> int:
-    if not args.execute or not args.i_am_present:
-        raise DeviceError("float charge requires both --execute and --i-am-present")
-    if not 0.01 <= args.current <= 2.00:
-        raise DeviceError("float-charge current must be between 0.01 and 2.00 A")
-    if not 13.5 <= args.voltage <= 13.8:
-        raise DeviceError("float-charge voltage must be between 13.5 and 13.8 V")
-    if not 1 <= args.timeout_minutes <= 240:
-        raise DeviceError("float-charge timeout must be between 1 and 240 minutes")
-    log_context, log_path = _command_log_context(args)
-    with (
-        EbcDevice(args.device, args.timeout) as tester,
-        log_context as logger,
-        SupervisedSession(tester, logger) as session,
-    ):
-        baseline = tester.begin_float_charge(
-            current_amps=args.current,
-            voltage_volts=args.voltage,
-            timeout_minutes=args.timeout_minutes,
-        )
-        if logger is not None:
-            logger.write(baseline, event="float-charge-baseline")
-        session.mark_started("float-charge-started")
-        print(
-            f"Float charge started: {args.voltage:.1f} V, {args.current:.2f} A limit, "
-            f"{args.timeout_minutes}-minute hard timeout"
-        )
-        print("Baseline: ", end="")
-        print_status(baseline)
-        run_active_session(
-            session=session,
-            tester=tester,
-            logger=logger,
-            printer=print_status,
-            timeout_minutes=args.timeout_minutes,
-            sample_event="float-charge-sample",
-        )
-    _report_log(log_path)
-    return 0
+    _require_supervised_execution(args, "float charge")
+    profile = make_float_charge_profile(
+        current_amps=args.current,
+        voltage_volts=args.voltage,
+        timeout_minutes=args.timeout_minutes,
+    )
+    return _run_profile(args, profile)
 
 
 def handle_capacity_test(args: argparse.Namespace) -> int:
-    if not args.execute or not args.i_am_present:
-        raise DeviceError("capacity test requires both --execute and --i-am-present")
-    if not 0.1 <= args.current <= 5.0:
-        raise DeviceError("capacity-test current must be between 0.1 and 5.0 A")
-    if not 10.2 <= args.cutoff_voltage <= 11.5:
-        raise DeviceError("capacity-test cutoff must be between 10.2 and 11.5 V")
-    if not 1 <= args.timeout_minutes <= 2880:
-        raise DeviceError("capacity-test timeout must be between 1 and 2880 minutes")
+    _require_supervised_execution(args, "capacity test")
+    profile = make_capacity_test_profile(
+        current_amps=args.current,
+        cutoff_volts=args.cutoff_voltage,
+        timeout_minutes=args.timeout_minutes,
+    )
+    return _run_profile(
+        args,
+        profile,
+        report_log_before_sampling=True,
+        show_baseline=False,
+    )
+
+
+def _run_profile(
+    args: argparse.Namespace,
+    profile: TesterProfile,
+    *,
+    report_log_before_sampling: bool = False,
+    show_baseline: bool = True,
+) -> int:
     log_context, log_path = _command_log_context(args)
     with (
         EbcDevice(args.device, args.timeout) as tester,
         log_context as logger,
         SupervisedSession(tester, logger) as session,
     ):
-        baseline = tester.begin_constant_current_discharge(
-            current_amps=args.current,
-            cutoff_volts=args.cutoff_voltage,
-            timeout_minutes=args.timeout_minutes,
-        )
+        baseline = profile.start(tester)
         if logger is not None:
-            logger.write(baseline, event="capacity-test-baseline")
-        session.mark_started("capacity-test-started")
-        print(
-            f"Capacity test started: {args.current:.2f} A to {args.cutoff_voltage:.1f} V, "
-            f"{args.timeout_minutes}-minute hard timeout",
-            flush=True,
-        )
-        _report_log(log_path)
+            logger.write(baseline, event=f"{profile.kind.value}-baseline")
+        session.mark_started(profile.start_event)
+        print(profile.summary, flush=profile.kind.value == "capacity-test")
+        if show_baseline:
+            print("Baseline: ", end="")
+            print_status(baseline)
+        if report_log_before_sampling:
+            _report_log(log_path)
         run_active_session(
             session=session,
             tester=tester,
             logger=logger,
             printer=print_status,
-            timeout_minutes=args.timeout_minutes,
-            sample_event="capacity-sample",
-            stop_on_cutoff=True,
+            timeout_minutes=profile.timeout_minutes,
+            sample_event=profile.sample_event,
+            stop_on_cutoff=profile.stop_on_cutoff,
         )
+    if not report_log_before_sampling:
+        _report_log(log_path)
     return 0
+
+
+def _require_supervised_execution(args: argparse.Namespace, operation: str) -> None:
+    if not args.execute or not args.i_am_present:
+        raise DeviceError(f"{operation} requires both --execute and --i-am-present")
 
 
 def handle_stop(args: argparse.Namespace) -> int:
