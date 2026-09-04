@@ -25,7 +25,11 @@ class StatusLogger(Protocol):
     """The logging operations needed by a supervised session."""
 
     def write(
-        self, status: EbcStatus, *, event: str, session_elapsed_seconds: float | None = None
+        self,
+        status: EbcStatus,
+        *,
+        event: str = "status",
+        session_elapsed_seconds: float | None = None,
     ) -> None: ...
 
     def write_event(self, event: str) -> None: ...
@@ -45,6 +49,13 @@ class SessionResult:
     stop_reason: SessionStopReason
     samples: int
     elapsed_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class MonitorResult:
+    """The outcome of a finite read-only monitoring run."""
+
+    samples: int
 
 
 class _SessionSignal(Exception):
@@ -234,3 +245,26 @@ def _finish_session(
         samples=samples,
         elapsed_seconds=max(0.0, clock() - session_started),
     )
+
+
+def run_monitor_session(
+    *,
+    tester: Tester,
+    logger: StatusLogger | None,
+    printer: Callable[[EbcStatus], None],
+    interval: float,
+    count: int | None,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> MonitorResult:
+    """Poll and log read-only status frames until *count* is reached."""
+
+    samples = 0
+    while True:
+        status = tester.status()
+        printer(status)
+        if logger is not None:
+            logger.write(status)
+        samples += 1
+        if count is not None and samples >= count:
+            return MonitorResult(samples=samples)
+        sleeper(interval)

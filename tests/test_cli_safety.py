@@ -143,6 +143,19 @@ class CliSafetyTests(unittest.TestCase):
         self.assertEqual(result.samples, 1)
         self.assertEqual(tester.stop_calls, 1)
 
+    def test_monitor_session_stops_after_requested_count(self) -> None:
+        tester = FakeTester([_status(), _status()])
+        result = session.run_monitor_session(
+            tester=tester,
+            logger=None,
+            printer=lambda _status: None,
+            interval=1.0,
+            count=2,
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(result, session.MonitorResult(samples=2))
+
     def test_active_session_stops_after_termination_signal(self) -> None:
         tester = FakeTester([session._SessionSignal(15)])
         with (

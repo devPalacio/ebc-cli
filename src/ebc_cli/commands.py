@@ -1,7 +1,6 @@
 """Command handlers for the ebc CLI."""
 
 import argparse
-import time
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,7 +14,13 @@ from .profiles import (
     make_recovery_profile,
 )
 from .protocol import EbcStatus, make_lead_acid_charge_plan
-from .session import SessionResult, SessionStopReason, SupervisedSession, run_active_session
+from .session import (
+    SessionResult,
+    SessionStopReason,
+    SupervisedSession,
+    run_active_session,
+    run_monitor_session,
+)
 
 
 def execute_command(args: argparse.Namespace) -> int:
@@ -163,17 +168,14 @@ def handle_monitor(args: argparse.Namespace) -> int:
         raise DeviceError("count must be greater than zero")
     log_context, log_path = _command_log_context(args)
     with EbcDevice(args.device, args.timeout) as tester, log_context as logger:
-        samples = 0
-        while True:
-            status = tester.status()
-            print_status(status)
-            if logger is not None:
-                logger.write(status)
-            samples += 1
-            if args.count is not None and samples >= args.count:
-                break
-            time.sleep(args.interval)
-    print(f"Logged {samples} sample(s)")
+        result = run_monitor_session(
+            tester=tester,
+            logger=logger,
+            printer=print_status,
+            interval=args.interval,
+            count=args.count,
+        )
+    print(f"Logged {result.samples} sample(s)")
     _report_log(log_path)
     return 0
 
