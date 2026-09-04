@@ -22,6 +22,8 @@ class ProfileKind(StrEnum):
 class ProfileStarter(Protocol):
     """The device operations needed to start a controlled profile."""
 
+    def begin_lead_acid_charge(self, *, current_amps: float, timeout_minutes: int) -> EbcStatus: ...
+
     def begin_lead_acid_recovery(
         self, *, current_amps: float, timeout_minutes: int
     ) -> EbcStatus: ...
@@ -170,6 +172,92 @@ class TesterProfile:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class BulkToFloatProfile:
+    """A bounded six-cell PbAc bulk charge followed by a CCCV float hold."""
+
+    bulk_current_amps: float
+    bulk_timeout_minutes: int
+    float_current_amps: float
+    float_voltage_volts: float
+    float_timeout_minutes: int
+
+    def __post_init__(self) -> None:
+        _require_range(
+            "bulk current",
+            self.bulk_current_amps,
+            0.01,
+            2.00,
+            "A",
+            minimum_text="0.01",
+            maximum_text="2.00",
+        )
+        _require_range("bulk timeout", self.bulk_timeout_minutes, 1, 1440, "minutes")
+        _require_range(
+            "float current",
+            self.float_current_amps,
+            0.01,
+            2.00,
+            "A",
+            minimum_text="0.01",
+            maximum_text="2.00",
+        )
+        if self.float_current_amps > self.bulk_current_amps:
+            raise ProfileError("float current must not exceed bulk current")
+        _require_range("float voltage", self.float_voltage_volts, 13.5, 13.8, "V")
+        _require_range("float timeout", self.float_timeout_minutes, 1, 240, "minutes")
+
+    @property
+    def start_event(self) -> str:
+        return "bulk-to-float-started"
+
+    @property
+    def bulk_baseline_event(self) -> str:
+        return "bulk-to-float-bulk-baseline"
+
+    @property
+    def bulk_sample_event(self) -> str:
+        return "bulk-to-float-bulk-sample"
+
+    @property
+    def float_start_event(self) -> str:
+        return "bulk-to-float-float-started"
+
+    @property
+    def float_baseline_event(self) -> str:
+        return "bulk-to-float-float-baseline"
+
+    @property
+    def float_sample_event(self) -> str:
+        return "bulk-to-float-float-sample"
+
+    @property
+    def summary(self) -> str:
+        return (
+            "Bulk-to-float started: PbAc, 6 cells, 14.4 V target, "
+            f"{self.bulk_current_amps:.2f} A bulk for up to {self.bulk_timeout_minutes} minutes; "
+            f"then {self.float_voltage_volts:.1f} V / {self.float_current_amps:.2f} A float "
+            f"for up to {self.float_timeout_minutes} minutes"
+        )
+
+    def start_bulk(self, tester: ProfileStarter) -> EbcStatus:
+        """Start the PbAc bulk phase and return the tester's baseline status."""
+
+        return tester.begin_lead_acid_charge(
+            current_amps=self.bulk_current_amps,
+            timeout_minutes=self.bulk_timeout_minutes,
+        )
+
+    def start_float(self, tester: ProfileStarter) -> EbcStatus:
+        """Start the CCCV float phase and return the tester's baseline status."""
+
+        return tester.begin_float_charge(
+            current_amps=self.float_current_amps,
+            voltage_volts=self.float_voltage_volts,
+            timeout_minutes=self.float_timeout_minutes,
+        )
+
+
 def make_recovery_profile(*, current_amps: float, timeout_minutes: int) -> TesterProfile:
     return TesterProfile(ProfileKind.RECOVERY, current_amps, timeout_minutes)
 
@@ -193,6 +281,25 @@ def make_capacity_test_profile(
         current_amps,
         timeout_minutes,
         cutoff_volts=cutoff_volts,
+    )
+
+
+def make_bulk_to_float_profile(
+    *,
+    bulk_current_amps: float,
+    bulk_timeout_minutes: int,
+    float_current_amps: float,
+    float_voltage_volts: float,
+    float_timeout_minutes: int,
+) -> BulkToFloatProfile:
+    """Build a validated, two-stage normal charge profile."""
+
+    return BulkToFloatProfile(
+        bulk_current_amps=bulk_current_amps,
+        bulk_timeout_minutes=bulk_timeout_minutes,
+        float_current_amps=float_current_amps,
+        float_voltage_volts=float_voltage_volts,
+        float_timeout_minutes=float_timeout_minutes,
     )
 
 

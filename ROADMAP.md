@@ -12,6 +12,8 @@ Completed in the current `0.1.x` baseline:
 - Read-only status and monitor commands.
 - Gated lead-acid recovery, CCCV float charging, and constant-current
   discharge profiles.
+- A supervised PbAc bulk-to-float profile that transitions on the tester's
+  source-defined PbAc auto-off state and bounds both charging stages.
 - Automatic flushed CSV session logs, including host monotonic elapsed time.
 - Best-effort stop on normal completion, operator interrupt, signal, and
   serial failure paths.
@@ -21,11 +23,16 @@ Completed in the current `0.1.x` baseline:
 - Versioned CSV schema metadata and a replayable, sanitized A10H fixture.
 - Read-only CSV replay and reporting for offline capacity summaries.
 - A model registry that keeps A10H serial settings, scaling, and profile
-  packets together while leaving unverified models read-only.
+  packets together, and decodes the source-documented A05 scaling while
+  leaving its unverified control path read-only.
 - Typed, validated charge and discharge profile objects shared by the CLI
   handlers.
 - Semantic completion reasons for the known A10H capacity cutoff status.
+- Semantic PbAc auto-off detection for staged normal charging.
 - Advisory CLI serial-device ownership with an emergency-stop bypass.
+- Read-only inventory of all operating modes defined by the source
+  `ebcc.init`, including their packet opcodes and chemistry hints.
+- Read-only `plan-mode` packet construction for the source-defined wire modes.
 - Hardware-free protocol, serial, and lifecycle tests, plus UV packaging
   checks.
 
@@ -59,10 +66,16 @@ Completed in the current `0.1.x` baseline:
 
 - [x] Move model-specific serial settings, scaling factors, and connection
   packets into a model registry.
-- [ ] Validate support for EBC-A05 and document its current scaling before
-  enabling control commands for it.
+- [x] Import the EBC-A05 identity, scaling, and connection frames from the
+  upstream `ebcc.init` as a read-only registry entry.
+- [ ] Capture and validate EBC-A05 profile behavior before enabling control
+  commands for it.
 - [ ] Add protocol support for constant-power discharge and the GUI's
   adjustable/continuous commands after capturing representative frames.
+- [x] Import the source operating-mode catalog as read-only metadata and
+  expose it through `ebc modes` without creating a runtime Lazarus dependency.
+- [x] Add checksum-finalized, read-only packet builders and `ebc plan-mode`
+  for source-defined modes; live control remains capture-gated.
 - [ ] Decide how to import or replace the GUI's `ebcc.init` packet definitions
   without making the CLI depend on Lazarus files at runtime.
 - [ ] Document the observed 8E1/odd-parity discrepancy between the GUI resource

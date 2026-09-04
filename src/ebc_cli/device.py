@@ -160,6 +160,14 @@ class EbcDevice:
         return parse_status(self._read_status_frame())
 
     def begin_lead_acid_recovery(self, *, current_amps: float, timeout_minutes: int) -> EbcStatus:
+        """Establish a safe baseline, then start a supervised PbAc recovery charge."""
+
+        return self.begin_lead_acid_charge(
+            current_amps=current_amps,
+            timeout_minutes=timeout_minutes,
+        )
+
+    def begin_lead_acid_charge(self, *, current_amps: float, timeout_minutes: int) -> EbcStatus:
         """Establish a safe baseline, then start a supervised PbAc charge."""
 
         return self._begin_profile(

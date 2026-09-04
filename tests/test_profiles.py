@@ -3,6 +3,7 @@ from unittest.mock import Mock
 
 from ebc_cli.profiles import (
     ProfileError,
+    make_bulk_to_float_profile,
     make_capacity_test_profile,
     make_float_charge_profile,
     make_recovery_profile,
@@ -43,6 +44,33 @@ class ProfileTests(unittest.TestCase):
             timeout_minutes=120,
         )
 
+    def test_bulk_to_float_profile_describes_both_stages_and_dispatches(self) -> None:
+        tester = Mock()
+        profile = make_bulk_to_float_profile(
+            bulk_current_amps=0.8,
+            bulk_timeout_minutes=1440,
+            float_current_amps=0.5,
+            float_voltage_volts=13.7,
+            float_timeout_minutes=240,
+        )
+
+        self.assertEqual(profile.start_event, "bulk-to-float-started")
+        self.assertEqual(profile.bulk_sample_event, "bulk-to-float-bulk-sample")
+        self.assertEqual(profile.float_sample_event, "bulk-to-float-float-sample")
+        self.assertIn("14.4 V target", profile.summary)
+
+        profile.start_bulk(tester)
+        profile.start_float(tester)
+        tester.begin_lead_acid_charge.assert_called_once_with(
+            current_amps=0.8,
+            timeout_minutes=1440,
+        )
+        tester.begin_float_charge.assert_called_once_with(
+            current_amps=0.5,
+            voltage_volts=13.7,
+            timeout_minutes=240,
+        )
+
     def test_profile_factories_reject_unsafe_parameters(self) -> None:
         invalid_profiles = (
             lambda: make_recovery_profile(current_amps=0.21, timeout_minutes=30),
@@ -55,6 +83,20 @@ class ProfileTests(unittest.TestCase):
                 current_amps=0.8,
                 cutoff_volts=12.0,
                 timeout_minutes=1440,
+            ),
+            lambda: make_bulk_to_float_profile(
+                bulk_current_amps=0.8,
+                bulk_timeout_minutes=1440,
+                float_current_amps=0.9,
+                float_voltage_volts=13.7,
+                float_timeout_minutes=240,
+            ),
+            lambda: make_bulk_to_float_profile(
+                bulk_current_amps=0.8,
+                bulk_timeout_minutes=1440,
+                float_current_amps=0.5,
+                float_voltage_volts=14.4,
+                float_timeout_minutes=240,
             ),
         )
         for factory in invalid_profiles:

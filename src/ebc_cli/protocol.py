@@ -26,16 +26,21 @@ PB_AC_START = bytes.fromhex("FA6100000000000000F8")
 CCCV_START = bytes.fromhex("FA7100000000000000F8")
 CC_DISCHARGE_START = bytes.fromhex("FA0100000000000000F8")
 
+EBC_A05_MODEL_ID = 0x05
 EBC_A10H_MODEL_ID = 0x06
 
 
 class EbcCompletionReason(StrEnum):
-    """Completion reasons confirmed from the A10H status stream."""
+    """Completion reasons defined by known A10H status states."""
 
     CAPACITY_CUTOFF = "capacity-cutoff"
+    LEAD_ACID_AUTO_OFF = "lead-acid-auto-off"
 
 
-_COMPLETION_REASONS = {0x14: EbcCompletionReason.CAPACITY_CUTOFF}
+_COMPLETION_REASONS = {
+    0x14: EbcCompletionReason.CAPACITY_CUTOFF,
+    0x1A: EbcCompletionReason.LEAD_ACID_AUTO_OFF,
+}
 
 
 class ProtocolError(ValueError):
@@ -285,9 +290,26 @@ def make_constant_current_discharge_plan(
     return finalize_command(result)
 
 
-# The A10H is the only model currently validated for control. Additional
-# models can be registered with their own serial/scaling/packet behavior after
-# their wire protocol has been captured and reviewed.
+# EBC-controller's ``ebcc.init`` identifies the A05 as 0x05 with a tenfold
+# current scaling factor and the A10H as 0x06 with unity scaling.  The source
+# gives both models the same connection packets.  We can therefore decode A05
+# status frames correctly, but keep its control path disabled until a real A05
+# wire capture confirms that the shared profile packet definitions are safe.
+A05_MODEL = EbcModel(
+    model_id=EBC_A05_MODEL_ID,
+    name="EBC-A05",
+    # The GUI resource says 8O1; the working Python/A10H connection is 8E1.
+    # Keep the source-derived model on the validated line settings until an
+    # A05 capture resolves that family-wide parity discrepancy.
+    serial=EbcSerialSettings(baudrate=9600, data_bits=8, parity="even", stop_bits=1),
+    current_factor=10.0,
+    voltage_factor=1.0,
+    connect_packet=CONNECT,
+    stop_packet=STOP,
+    disconnect_packet=DISCONNECT,
+    supports_control=False,
+)
+
 A10H_MODEL = EbcModel(
     model_id=EBC_A10H_MODEL_ID,
     name="EBC-A10H",
@@ -305,7 +327,10 @@ A10H_MODEL = EbcModel(
     },
 )
 
-MODEL_REGISTRY: dict[int, EbcModel] = {A10H_MODEL.model_id: A10H_MODEL}
+MODEL_REGISTRY: dict[int, EbcModel] = {
+    A05_MODEL.model_id: A05_MODEL,
+    A10H_MODEL.model_id: A10H_MODEL,
+}
 MODEL_NAMES: dict[int, str] = {model_id: model.name for model_id, model in MODEL_REGISTRY.items()}
 
 

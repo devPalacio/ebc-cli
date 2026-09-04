@@ -2,9 +2,11 @@ import unittest
 
 from ebc_cli.device import DeviceError, EbcDevice
 from ebc_cli.protocol import (
+    A05_MODEL,
     A10H_MODEL,
     CONNECT,
     DISCONNECT,
+    EBC_A05_MODEL_ID,
     EBC_A10H_MODEL_ID,
     FRAME_PREFIX,
     FRAME_SUFFIX,
@@ -27,6 +29,18 @@ from ebc_cli.protocol import (
 
 
 class ModelRegistryTests(unittest.TestCase):
+    def test_a05_source_definition_is_registered_read_only(self) -> None:
+        model = get_model(EBC_A05_MODEL_ID)
+
+        self.assertIs(model, A05_MODEL)
+        self.assertEqual(model.name, "EBC-A05")
+        self.assertEqual(model.serial, EbcSerialSettings(9600, 8, "even", 1))
+        self.assertEqual((model.current_factor, model.voltage_factor), (10.0, 1.0))
+        self.assertEqual(model.connect_packet, CONNECT)
+        self.assertEqual(model.stop_packet, STOP)
+        self.assertEqual(model.disconnect_packet, DISCONNECT)
+        self.assertFalse(model.supports_control)
+
     def test_a10h_registry_contains_the_validated_wire_behavior(self) -> None:
         model = get_model(EBC_A10H_MODEL_ID)
 
@@ -72,11 +86,11 @@ class ModelRegistryTests(unittest.TestCase):
         )
 
     def test_unregistered_model_is_not_controlled_by_default(self) -> None:
-        self.assertIsNone(get_model(0x05))
+        self.assertIsNone(get_model(0x99))
 
         read_only_model = EbcModel(
-            model_id=0x05,
-            name="EBC-A05",
+            model_id=0x99,
+            name="unknown",
             serial=EbcSerialSettings(),
         )
         with self.assertRaisesRegex(ProtocolError, "does not support control"):
@@ -94,7 +108,7 @@ class ModelRegistryTests(unittest.TestCase):
 
     def test_registered_model_scaling_is_used_by_status_parser(self) -> None:
         model = EbcModel(
-            model_id=0x05,
+            model_id=0x98,
             name="test-model",
             serial=EbcSerialSettings(),
             current_factor=2.0,
@@ -107,8 +121,15 @@ class ModelRegistryTests(unittest.TestCase):
             MODEL_REGISTRY.pop(model.model_id)
             MODEL_NAMES.pop(model.model_id, None)
 
-        self.assertEqual(status.current_amps, 0.35)
-        self.assertEqual(status.voltage_volts, 3.0)
+        self.assertAlmostEqual(status.current_amps, 0.35)
+        self.assertAlmostEqual(status.voltage_volts, 3.0)
+
+    def test_a05_source_scaling_is_used_by_status_parser(self) -> None:
+        status = parse_status(status_frame(model_id=EBC_A05_MODEL_ID))
+
+        self.assertEqual(status.model_name, "EBC-A05")
+        self.assertAlmostEqual(status.current_amps, 0.07)
+        self.assertAlmostEqual(status.voltage_volts, 12.0)
 
 
 def status_frame(*, model_id: int) -> bytes:

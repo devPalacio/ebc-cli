@@ -31,6 +31,38 @@ def build_parser() -> argparse.ArgumentParser:
                 help="stop after this many samples (default: run until interrupted)",
             )
 
+    subcommands.add_parser(
+        "modes",
+        aliases=("list-modes",),
+        help="list operating modes imported from the EBC-controller source; never connects",
+    )
+
+    mode_plan = subcommands.add_parser(
+        "plan-mode",
+        help="build a source-defined mode packet without connecting or transmitting",
+    )
+    mode_plan.add_argument("mode", help="source mode command, such as c_NiMH or d_CP")
+    mode_plan.add_argument("--current", type=float, help="current setpoint in amps")
+    mode_plan.add_argument("--cells", type=int, help="series cell count for chemistry charge modes")
+    mode_plan.add_argument("--voltage", type=float, help="CCCV target voltage in volts")
+    mode_plan.add_argument("--cutoff-voltage", type=float, help="discharge cutoff voltage in volts")
+    mode_plan.add_argument("--power", type=float, help="constant-power setpoint in watts")
+    mode_plan.add_argument("--resistance", type=float, help="software-CR resistance in ohms")
+    mode_plan.add_argument(
+        "--observed-voltage",
+        type=float,
+        help="latest measured voltage for software-CR current calculation",
+    )
+    mode_plan.add_argument(
+        "--timeout-minutes", type=int, default=60, help="device timer value (default: 60)"
+    )
+    mode_plan.add_argument(
+        "--phase",
+        choices=("start", "cont", "adjust"),
+        default="start",
+        help="source packet phase (default: start)",
+    )
+
     report = subcommands.add_parser(
         "report",
         help="summarize a recorded CSV session without connecting to the tester",
@@ -100,6 +132,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     float_charge.add_argument("--execute", action="store_true", help="required to transmit")
     float_charge.add_argument(
+        "--i-am-present", action="store_true", help="required: confirm this is supervised"
+    )
+
+    bulk_to_float = subcommands.add_parser(
+        "bulk-to-float",
+        help="run a supervised PbAc bulk charge followed by a bounded CCCV float hold",
+    )
+    _add_device_options(bulk_to_float)
+    bulk_to_float.add_argument(
+        "--bulk-current",
+        type=float,
+        default=0.80,
+        help="PbAc bulk current in amps (0.01 to 2.00; default: 0.80)",
+    )
+    bulk_to_float.add_argument(
+        "--bulk-timeout-minutes",
+        type=int,
+        default=1440,
+        help="bulk hard timeout in minutes (1 to 1440; default: 1440)",
+    )
+    bulk_to_float.add_argument(
+        "--float-current",
+        type=float,
+        default=0.50,
+        help="CCCV float current limit in amps (0.01 to 2.00; default: 0.50)",
+    )
+    bulk_to_float.add_argument(
+        "--float-voltage",
+        type=float,
+        default=13.7,
+        help="CCCV float voltage in volts (13.5 to 13.8; default: 13.7)",
+    )
+    bulk_to_float.add_argument(
+        "--float-timeout-minutes",
+        type=int,
+        default=240,
+        help="float-hold hard timeout in minutes (1 to 240; default: 240)",
+    )
+    bulk_to_float.add_argument("--execute", action="store_true", help="required to transmit")
+    bulk_to_float.add_argument(
         "--i-am-present", action="store_true", help="required: confirm this is supervised"
     )
 

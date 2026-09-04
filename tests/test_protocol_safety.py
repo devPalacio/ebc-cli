@@ -17,6 +17,7 @@ from ebc_cli.protocol import (
     encode_timer,
     find_valid_status_frame,
     make_cccv_charge_plan,
+    make_lead_acid_charge_plan,
     parse_status,
 )
 
@@ -118,6 +119,25 @@ class ProtocolSafetyTests(unittest.TestCase):
                 call(
                     make_cccv_charge_plan(current_amps=0.5, voltage_volts=13.7, timeout_minutes=120)
                 ),
+            ],
+        )
+
+    def test_begin_lead_acid_charge_uses_the_dedicated_pb_ac_profile(self) -> None:
+        device = EbcDevice(timeout=0.1)
+        device._fd = 1
+        device._write_all = Mock()
+        device._read_status_frame = Mock(side_effect=[status_frame(), status_frame()])
+
+        baseline = device.begin_lead_acid_charge(current_amps=0.8, timeout_minutes=1440)
+
+        self.assertEqual(baseline.model_id, 0x06)
+        self.assertEqual(
+            device._write_all.call_args_list,
+            [
+                call(CONNECT),
+                call(STOP),
+                call(CONNECT),
+                call(make_lead_acid_charge_plan(current_amps=0.8, cells=6, timeout_minutes=1440)),
             ],
         )
 

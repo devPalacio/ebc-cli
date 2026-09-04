@@ -30,6 +30,9 @@ class FakeTester:
     def begin_lead_acid_recovery(self, **_kwargs: object) -> EbcStatus:
         return _status()
 
+    def begin_lead_acid_charge(self, **_kwargs: object) -> EbcStatus:
+        return _status()
+
     def begin_constant_current_discharge(self, **_kwargs: object) -> EbcStatus:
         return _status()
 
@@ -311,6 +314,41 @@ class CliSafetyTests(unittest.TestCase):
         self.assertEqual(tester.stop_calls, 1)
         self.assertEqual(rows[2][1], "recovery-baseline")
         self.assertEqual(rows[3][1], "recovery-started")
+
+    def test_bulk_to_float_main_uses_a_supervised_logged_session(self) -> None:
+        tester = FakeTester()
+        with TemporaryDirectory() as temporary_directory:
+            with (
+                patch.object(resources, "EbcDevice", return_value=tester),
+                patch.object(commands, "run_bulk_to_float_session", autospec=True) as run_session,
+            ):
+                run_session.return_value = session.SessionResult(
+                    stop_reason=session.SessionStopReason.FLOAT_TIMEOUT,
+                    samples=0,
+                    elapsed_seconds=0.0,
+                )
+                result = cli.main(
+                    [
+                        "bulk-to-float",
+                        "--execute",
+                        "--i-am-present",
+                        "--bulk-timeout-minutes",
+                        "1",
+                        "--float-timeout-minutes",
+                        "1",
+                        "--log-dir",
+                        temporary_directory,
+                    ]
+                )
+            paths = list(Path(temporary_directory).glob("*.csv"))
+            with paths[0].open(newline="", encoding="utf-8") as csv_file:
+                rows = list(csv.reader(csv_file))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(run_session.call_count, 1)
+        self.assertEqual(tester.stop_calls, 1)
+        self.assertEqual(rows[2][1], "bulk-to-float-bulk-baseline")
+        self.assertEqual(rows[3][1], "bulk-to-float-started")
 
 
 def _status(*, state: int = 0x68) -> EbcStatus:

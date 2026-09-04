@@ -130,6 +130,10 @@ class ProtocolTests(unittest.TestCase):
         status = parse_status(_status_frame(state=0x14))
         self.assertIs(status.completion_reason, EbcCompletionReason.CAPACITY_CUTOFF)
 
+    def test_status_exposes_lead_acid_auto_off_reason(self) -> None:
+        status = parse_status(_status_frame(state=0x1A))
+        self.assertIs(status.completion_reason, EbcCompletionReason.LEAD_ACID_AUTO_OFF)
+
     def test_status_parser_rejects_bad_checksum(self) -> None:
         frame = bytearray(19)
         frame[0] = FRAME_PREFIX
@@ -182,6 +186,23 @@ class ProtocolTests(unittest.TestCase):
 
     def test_capacity_test_requires_two_explicit_acknowledgements(self) -> None:
         self.assertEqual(main(["capacity-test"]), 2)
+
+    def test_bulk_to_float_requires_two_explicit_acknowledgements(self) -> None:
+        self.assertEqual(main(["bulk-to-float"]), 2)
+
+    def test_bulk_to_float_rejects_an_unsafe_float_voltage_before_opening_port(self) -> None:
+        self.assertEqual(
+            main(
+                [
+                    "bulk-to-float",
+                    "--float-voltage",
+                    "14.4",
+                    "--execute",
+                    "--i-am-present",
+                ]
+            ),
+            2,
+        )
 
 
 def _status_frame(*, state: int = 0x68) -> bytes:

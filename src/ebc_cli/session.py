@@ -9,6 +9,7 @@ from typing import Protocol, Self
 
 from .device import DeviceError
 from .measurement import MeasurementAccumulator, MeasurementSummary
+from .profiles import BulkToFloatProfile
 from .protocol import EbcCompletionReason, EbcStatus
 
 
@@ -40,6 +41,8 @@ class SessionStopReason(StrEnum):
     """Why a supervised active operation ended normally."""
 
     TIMEOUT = "timeout"
+    BULK_TIMEOUT = "bulk-timeout"
+    FLOAT_TIMEOUT = "float-timeout"
     DEVICE_CUTOFF = "device-cutoff"
 
 
@@ -262,6 +265,83 @@ def _finish_session(
         final_status=final_status,
         measurement=accounting.summary,
     )
+
+
+def run_bulk_to_float_session(
+    *,
+    session: SupervisedSession,
+    tester: Tester,
+    logger: StatusLogger | None,
+    printer: Callable[[EbcStatus], None],
+    profile: BulkToFloatProfile,
+    on_float_start: Callable[[EbcStatus], None] | None = None,
+    poll_interval: float = 1.0,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> SessionResult:
+    """Run PbAc bulk charging, then a bounded CCCV float hold.
+
+    The phase transition is driven only by the source-defined PbAc auto-off
+    status. If that state does not arrive before the bulk deadline, the
+    tester is stopped and the float phase is never started.
+    """
+
+    session_started = clock()
+    phase = "bulk"
+    phase_deadline = session_started + profile.bulk_timeout_minutes * 60
+    samples = 0
+    final_status: EbcStatus | None = None
+    accounting = MeasurementAccumulator()
+    while True:
+        now = clock()
+        if now >= phase_deadline:
+            if phase == "bulk":
+                stop_event = "bulk-timeout-stop-sent"
+                stop_reason = SessionStopReason.BULK_TIMEOUT
+            else:
+                stop_event = "float-timeout-stop-sent"
+                stop_reason = SessionStopReason.FLOAT_TIMEOUT
+            return _finish_session(
+                session=session,
+                stop_event=stop_event,
+                stop_reason=stop_reason,
+                samples=samples,
+                session_started=session_started,
+                clock=clock,
+                final_status=final_status,
+                accounting=accounting,
+            )
+
+        status = read_live_status(tester)
+        final_status = status
+        sample_elapsed = clock() - session_started
+        accounting.add(status, sample_elapsed)
+        printer(status)
+        if logger is not None:
+            event = profile.bulk_sample_event if phase == "bulk" else profile.float_sample_event
+            logger.write(status, event=event, session_elapsed_seconds=sample_elapsed)
+        samples += 1
+
+        if phase == "bulk" and status.completion_reason is EbcCompletionReason.LEAD_ACID_AUTO_OFF:
+            float_baseline = profile.start_float(tester)
+            final_status = float_baseline
+            if logger is not None:
+                logger.write(
+                    float_baseline,
+                    event=profile.float_baseline_event,
+                    session_elapsed_seconds=clock() - session_started,
+                )
+                logger.write_event(profile.float_start_event)
+            if on_float_start is not None:
+                on_float_start(float_baseline)
+            phase = "float"
+            phase_deadline = clock() + profile.float_timeout_minutes * 60
+            continue
+
+        remaining = phase_deadline - clock()
+        if remaining <= 0:
+            continue
+        sleeper(min(poll_interval, remaining))
 
 
 def run_monitor_session(
