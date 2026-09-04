@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--current",
         type=float,
         default=0.20,
-        help="recovery current in amps (0.01 to 0.20; default: 0.20)",
+        help="recovery current in amps (0.05 to 0.20; default: 0.20)",
     )
     recovery.add_argument(
         "--timeout-minutes",
@@ -116,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--current",
         type=float,
         default=0.50,
-        help="current limit in amps (0.01 to 2.00; default: 0.50)",
+        help="current limit in amps (0.05 to 2.00; default: 0.50)",
     )
     float_charge.add_argument(
         "--voltage",
@@ -144,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--bulk-current",
         type=float,
         default=0.80,
-        help="PbAc bulk current in amps (0.01 to 2.00; default: 0.80)",
+        help="PbAc bulk current in amps (0.05 to 2.00; default: 0.80)",
     )
     bulk_to_float.add_argument(
         "--bulk-timeout-minutes",
@@ -156,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--float-current",
         type=float,
         default=0.50,
-        help="CCCV float current limit in amps (0.01 to 2.00; default: 0.50)",
+        help="CCCV float current limit in amps (0.05 to 2.00; default: 0.50)",
     )
     bulk_to_float.add_argument(
         "--float-voltage",

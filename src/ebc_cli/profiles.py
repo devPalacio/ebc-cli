@@ -52,10 +52,10 @@ class TesterProfile:
             _require_range(
                 "recovery current",
                 self.current_amps,
-                0.01,
+                0.05,
                 0.20,
                 "A",
-                minimum_text="0.01",
+                minimum_text="0.05",
                 maximum_text="0.20",
             )
             _require_range(
@@ -70,10 +70,10 @@ class TesterProfile:
             _require_range(
                 "float-charge current",
                 self.current_amps,
-                0.01,
+                0.05,
                 2.00,
                 "A",
-                minimum_text="0.01",
+                minimum_text="0.05",
                 maximum_text="2.00",
             )
             _require_range(
@@ -186,20 +186,20 @@ class BulkToFloatProfile:
         _require_range(
             "bulk current",
             self.bulk_current_amps,
-            0.01,
+            0.05,
             2.00,
             "A",
-            minimum_text="0.01",
+            minimum_text="0.05",
             maximum_text="2.00",
         )
         _require_range("bulk timeout", self.bulk_timeout_minutes, 1, 1440, "minutes")
         _require_range(
             "float current",
             self.float_current_amps,
-            0.01,
+            0.05,
             2.00,
             "A",
-            minimum_text="0.01",
+            minimum_text="0.05",
             maximum_text="2.00",
         )
         if self.float_current_amps > self.bulk_current_amps:

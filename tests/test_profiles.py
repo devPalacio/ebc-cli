@@ -103,6 +103,54 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaises(ProfileError):
                 factory()
 
+    def test_charge_profiles_accept_the_documented_tester_minimum(self) -> None:
+        recovery = make_recovery_profile(current_amps=0.05, timeout_minutes=30)
+        float_charge = make_float_charge_profile(
+            current_amps=0.05,
+            voltage_volts=13.7,
+            timeout_minutes=120,
+        )
+        bulk_to_float = make_bulk_to_float_profile(
+            bulk_current_amps=0.05,
+            bulk_timeout_minutes=1440,
+            float_current_amps=0.05,
+            float_voltage_volts=13.7,
+            float_timeout_minutes=240,
+        )
+
+        self.assertEqual(recovery.current_amps, 0.05)
+        self.assertEqual(float_charge.current_amps, 0.05)
+        self.assertEqual(bulk_to_float.bulk_current_amps, 0.05)
+        self.assertEqual(bulk_to_float.float_current_amps, 0.05)
+
+    def test_charge_profiles_reject_current_below_the_documented_tester_minimum(self) -> None:
+        invalid_profiles = (
+            lambda: make_recovery_profile(current_amps=0.049, timeout_minutes=30),
+            lambda: make_float_charge_profile(
+                current_amps=0.049,
+                voltage_volts=13.7,
+                timeout_minutes=120,
+            ),
+            lambda: make_bulk_to_float_profile(
+                bulk_current_amps=0.049,
+                bulk_timeout_minutes=1440,
+                float_current_amps=0.05,
+                float_voltage_volts=13.7,
+                float_timeout_minutes=240,
+            ),
+            lambda: make_bulk_to_float_profile(
+                bulk_current_amps=0.05,
+                bulk_timeout_minutes=1440,
+                float_current_amps=0.049,
+                float_voltage_volts=13.7,
+                float_timeout_minutes=240,
+            ),
+        )
+
+        for factory in invalid_profiles:
+            with self.assertRaisesRegex(ProfileError, "between 0.05 and"):
+                factory()
+
 
 if __name__ == "__main__":
     unittest.main()
