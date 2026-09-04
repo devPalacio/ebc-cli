@@ -28,6 +28,9 @@ CSV session in `~/ebc-logs` (or the directory supplied with `--log-dir`). Use
 decoded values and the raw response frame, and rows are flushed as they are
 written so a live test remains useful if it is interrupted.
 
+When an active command finishes, it prints the stop reason, elapsed host time,
+sample count, and the last decoded tester status when one was received.
+
 The existing GUI must be closed before using a serial command: two programs
 must not read from the tester's one serial port at the same time. Commands that
 start a charge, recovery, or capacity test require both `--execute` and

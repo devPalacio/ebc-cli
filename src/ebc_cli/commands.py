@@ -139,7 +139,13 @@ def _report_session_result(result: SessionResult) -> None:
         print("Hard timeout reached; stop frame sent.", flush=True)
     else:
         print("Device cutoff reached; stop frame sent.", flush=True)
-    print(f"Logged {result.samples} active sample(s)", flush=True)
+    print(
+        f"Session: {result.elapsed_seconds:.1f} s, {result.samples} active sample(s)",
+        flush=True,
+    )
+    if result.final_status is not None:
+        print("Terminal: ", end="")
+        print_status(result.final_status)
 
 
 def handle_stop(args: argparse.Namespace) -> int:

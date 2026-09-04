@@ -15,6 +15,8 @@ Completed in the current `0.1.x` baseline:
 - Automatic flushed CSV session logs, including host monotonic elapsed time.
 - Best-effort stop on normal completion, operator interrupt, signal, and
   serial failure paths.
+- Final active-session summaries with stop reason, elapsed duration, sample
+  count, and the last decoded tester status.
 - Typed, validated charge and discharge profile objects shared by the CLI
   handlers.
 - Semantic completion reasons for the known A10H capacity cutoff status.
@@ -33,13 +35,11 @@ Completed in the current `0.1.x` baseline:
   timeouts, disconnects, and stop-on-cleanup behavior.
 - [ ] Capture and replay real A10H sessions in tests, including both parity and
   checksum variants encountered in the field.
-- [ ] Add a final session summary containing stop reason, duration, terminal
-  voltage/current, Ah, and Wh.
+- [ ] Compute host-side Ah and Wh independently from sampled current, voltage,
+  and monotonic elapsed time.
 
 ## Measurement and analysis
 
-- [ ] Compute host-side Ah and Wh independently from sampled current, voltage,
-  and monotonic elapsed time.
 - [ ] Add a read-only `report` command for summarizing a CSV capacity run.
 - [ ] Add a replay adapter so logs can be inspected without the tester
   connected.

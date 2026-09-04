@@ -44,11 +44,12 @@ class SessionStopReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class SessionResult:
-    """The durable outcome of a normally completed active operation."""
+    """The durable outcome and terminal snapshot of an active operation."""
 
     stop_reason: SessionStopReason
     samples: int
     elapsed_seconds: float
+    final_status: EbcStatus | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +184,7 @@ def run_active_session(
     session_started = clock()
     deadline = session_started + timeout_minutes * 60
     samples = 0
+    final_status: EbcStatus | None = None
     while True:
         if clock() >= deadline:
             return _finish_session(
@@ -192,9 +194,11 @@ def run_active_session(
                 samples=samples,
                 session_started=session_started,
                 clock=clock,
+                final_status=final_status,
             )
 
         status = read_live_status(tester)
+        final_status = status
         printer(status)
         if logger is not None:
             logger.write(
@@ -214,6 +218,7 @@ def run_active_session(
                 samples=samples,
                 session_started=session_started,
                 clock=clock,
+                final_status=final_status,
             )
 
         remaining = deadline - clock()
@@ -225,6 +230,7 @@ def run_active_session(
                 samples=samples,
                 session_started=session_started,
                 clock=clock,
+                final_status=final_status,
             )
         sleeper(min(poll_interval, remaining))
 
@@ -237,12 +243,14 @@ def _finish_session(
     samples: int,
     session_started: float,
     clock: Callable[[], float],
+    final_status: EbcStatus | None,
 ) -> SessionResult:
     session.stop(stop_event, raise_errors=True)
     return SessionResult(
         stop_reason=stop_reason,
         samples=samples,
         elapsed_seconds=max(0.0, clock() - session_started),
+        final_status=final_status,
     )
 
 

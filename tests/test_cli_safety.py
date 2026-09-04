@@ -1,5 +1,7 @@
 import csv
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Self
@@ -60,6 +62,7 @@ class FakeClock:
 class CliSafetyTests(unittest.TestCase):
     def test_active_session_stops_and_logs_at_timeout(self) -> None:
         tester = FakeTester([_status()])
+        expected_final_status = tester.statuses[0]
         clock = FakeClock()
         with TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "session.csv"
@@ -86,6 +89,7 @@ class CliSafetyTests(unittest.TestCase):
         self.assertEqual(result.stop_reason, session.SessionStopReason.TIMEOUT)
         self.assertEqual(result.samples, 1)
         self.assertEqual(result.elapsed_seconds, 60.0)
+        self.assertIs(result.final_status, expected_final_status)
         self.assertEqual(
             [row[1] for row in rows[1:]],
             [
@@ -123,7 +127,8 @@ class CliSafetyTests(unittest.TestCase):
         self.assertEqual(rows[-1][1], "error-stop-sent")
 
     def test_active_session_stops_at_device_cutoff(self) -> None:
-        tester = FakeTester([_status(state=0x14)])
+        expected_final_status = _status(state=0x14)
+        tester = FakeTester([expected_final_status])
         clock = FakeClock()
         with session.SupervisedSession(tester, None) as supervised:
             supervised.mark_started("test-started")
@@ -141,7 +146,43 @@ class CliSafetyTests(unittest.TestCase):
 
         self.assertEqual(result.stop_reason, session.SessionStopReason.DEVICE_CUTOFF)
         self.assertEqual(result.samples, 1)
+        self.assertIs(result.final_status, expected_final_status)
         self.assertEqual(tester.stop_calls, 1)
+
+    def test_active_session_without_samples_has_no_terminal_status(self) -> None:
+        tester = FakeTester()
+        with session.SupervisedSession(tester, None) as supervised:
+            supervised.mark_started("test-started")
+            result = session.run_active_session(
+                session=supervised,
+                tester=tester,
+                logger=None,
+                printer=lambda _status: None,
+                timeout_minutes=0,
+                sample_event="test-sample",
+                clock=lambda: 0.0,
+                sleeper=lambda _seconds: None,
+            )
+
+        self.assertIsNone(result.final_status)
+        self.assertEqual(result.stop_reason, session.SessionStopReason.TIMEOUT)
+
+    def test_session_result_reports_terminal_snapshot(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            commands._report_session_result(
+                session.SessionResult(
+                    stop_reason=session.SessionStopReason.DEVICE_CUTOFF,
+                    samples=4,
+                    elapsed_seconds=123.4,
+                    final_status=_status(state=0x14),
+                )
+            )
+
+        rendered = output.getvalue()
+        self.assertIn("Device cutoff reached; stop frame sent.", rendered)
+        self.assertIn("Session: 123.4 s, 4 active sample(s)", rendered)
+        self.assertIn("Terminal: EBC-A10H: 12.000 V", rendered)
 
     def test_monitor_session_stops_after_requested_count(self) -> None:
         tester = FakeTester([_status(), _status()])
