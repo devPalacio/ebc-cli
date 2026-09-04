@@ -3,6 +3,8 @@
 import signal
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol, Self
 
 from .device import DeviceError
@@ -27,6 +29,22 @@ class StatusLogger(Protocol):
     ) -> None: ...
 
     def write_event(self, event: str) -> None: ...
+
+
+class SessionStopReason(StrEnum):
+    """Why a supervised active operation ended normally."""
+
+    TIMEOUT = "timeout"
+    DEVICE_CUTOFF = "device-cutoff"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionResult:
+    """The durable outcome of a normally completed active operation."""
+
+    stop_reason: SessionStopReason
+    samples: int
+    elapsed_seconds: float
 
 
 class _SessionSignal(Exception):
@@ -148,7 +166,7 @@ def run_active_session(
     poll_interval: float = 1.0,
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
-) -> None:
+) -> SessionResult:
     """Log live status until cutoff or timeout, stopping the tester on exit."""
 
     session_started = clock()
@@ -156,10 +174,14 @@ def run_active_session(
     samples = 0
     while True:
         if clock() >= deadline:
-            session.stop("timeout-stop-sent", raise_errors=True)
-            print("Hard timeout reached; stop frame sent.", flush=True)
-            print(f"Logged {samples} active sample(s)", flush=True)
-            return
+            return _finish_session(
+                session=session,
+                stop_event="timeout-stop-sent",
+                stop_reason=SessionStopReason.TIMEOUT,
+                samples=samples,
+                session_started=session_started,
+                clock=clock,
+            )
 
         status = read_live_status(tester)
         printer(status)
@@ -175,15 +197,40 @@ def run_active_session(
         # signal is meaningful for capacity tests; charge modes remain bounded
         # by their configured timeout because completion codes vary.
         if stop_on_cutoff and status.raw[1] == 0x14:
-            session.stop("device-cutoff-stop-sent", raise_errors=True)
-            print("Device cutoff reached; stop frame sent.", flush=True)
-            print(f"Logged {samples} active sample(s)", flush=True)
-            return
+            return _finish_session(
+                session=session,
+                stop_event="device-cutoff-stop-sent",
+                stop_reason=SessionStopReason.DEVICE_CUTOFF,
+                samples=samples,
+                session_started=session_started,
+                clock=clock,
+            )
 
         remaining = deadline - clock()
         if remaining <= 0:
-            session.stop("timeout-stop-sent", raise_errors=True)
-            print("Hard timeout reached; stop frame sent.", flush=True)
-            print(f"Logged {samples} active sample(s)", flush=True)
-            return
+            return _finish_session(
+                session=session,
+                stop_event="timeout-stop-sent",
+                stop_reason=SessionStopReason.TIMEOUT,
+                samples=samples,
+                session_started=session_started,
+                clock=clock,
+            )
         sleeper(min(poll_interval, remaining))
+
+
+def _finish_session(
+    *,
+    session: SupervisedSession,
+    stop_event: str,
+    stop_reason: SessionStopReason,
+    samples: int,
+    session_started: float,
+    clock: Callable[[], float],
+) -> SessionResult:
+    session.stop(stop_event, raise_errors=True)
+    return SessionResult(
+        stop_reason=stop_reason,
+        samples=samples,
+        elapsed_seconds=max(0.0, clock() - session_started),
+    )

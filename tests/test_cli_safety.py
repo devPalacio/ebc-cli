@@ -68,7 +68,7 @@ class CliSafetyTests(unittest.TestCase):
                 session.SupervisedSession(tester, logger) as supervised,
             ):
                 supervised.mark_started("test-started")
-                session.run_active_session(
+                result = session.run_active_session(
                     session=supervised,
                     tester=tester,
                     logger=logger,
@@ -83,6 +83,9 @@ class CliSafetyTests(unittest.TestCase):
                 rows = list(csv.reader(csv_file))
 
         self.assertEqual(tester.stop_calls, 1)
+        self.assertEqual(result.stop_reason, session.SessionStopReason.TIMEOUT)
+        self.assertEqual(result.samples, 1)
+        self.assertEqual(result.elapsed_seconds, 60.0)
         self.assertEqual(
             [row[1] for row in rows[1:]],
             [
@@ -118,6 +121,27 @@ class CliSafetyTests(unittest.TestCase):
 
         self.assertEqual(tester.stop_calls, 1)
         self.assertEqual(rows[-1][1], "error-stop-sent")
+
+    def test_active_session_stops_at_device_cutoff(self) -> None:
+        tester = FakeTester([_status(state=0x14)])
+        clock = FakeClock()
+        with session.SupervisedSession(tester, None) as supervised:
+            supervised.mark_started("test-started")
+            result = session.run_active_session(
+                session=supervised,
+                tester=tester,
+                logger=None,
+                printer=lambda _status: None,
+                timeout_minutes=1,
+                sample_event="test-sample",
+                clock=clock,
+                sleeper=clock.sleep,
+                stop_on_cutoff=True,
+            )
+
+        self.assertEqual(result.stop_reason, session.SessionStopReason.DEVICE_CUTOFF)
+        self.assertEqual(result.samples, 1)
+        self.assertEqual(tester.stop_calls, 1)
 
     def test_active_session_stops_after_termination_signal(self) -> None:
         tester = FakeTester([session._SessionSignal(15)])
@@ -164,6 +188,11 @@ class CliSafetyTests(unittest.TestCase):
                 patch.object(commands, "EbcDevice", return_value=tester),
                 patch.object(commands, "run_active_session", autospec=True) as run_session,
             ):
+                run_session.return_value = session.SessionResult(
+                    stop_reason=session.SessionStopReason.TIMEOUT,
+                    samples=0,
+                    elapsed_seconds=0.0,
+                )
                 result = cli.main(
                     [
                         "recover-lead-acid",

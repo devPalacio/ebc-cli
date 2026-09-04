@@ -15,7 +15,7 @@ from .profiles import (
     make_recovery_profile,
 )
 from .protocol import EbcStatus, make_lead_acid_charge_plan
-from .session import SupervisedSession, run_active_session
+from .session import SessionResult, SessionStopReason, SupervisedSession, run_active_session
 
 
 def execute_command(args: argparse.Namespace) -> int:
@@ -104,7 +104,7 @@ def _run_profile(
             print_status(baseline)
         if report_log_before_sampling:
             _report_log(log_path)
-        run_active_session(
+        result = run_active_session(
             session=session,
             tester=tester,
             logger=logger,
@@ -113,6 +113,7 @@ def _run_profile(
             sample_event=profile.sample_event,
             stop_on_cutoff=profile.stop_on_cutoff,
         )
+        _report_session_result(result)
     if not report_log_before_sampling:
         _report_log(log_path)
     return 0
@@ -121,6 +122,14 @@ def _run_profile(
 def _require_supervised_execution(args: argparse.Namespace, operation: str) -> None:
     if not args.execute or not args.i_am_present:
         raise DeviceError(f"{operation} requires both --execute and --i-am-present")
+
+
+def _report_session_result(result: SessionResult) -> None:
+    if result.stop_reason is SessionStopReason.TIMEOUT:
+        print("Hard timeout reached; stop frame sent.", flush=True)
+    else:
+        print("Device cutoff reached; stop frame sent.", flush=True)
+    print(f"Logged {result.samples} active sample(s)", flush=True)
 
 
 def handle_stop(args: argparse.Namespace) -> int:
