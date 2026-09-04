@@ -13,11 +13,12 @@ from .protocol import EbcStatus
 CSV_HEADER = (
     "timestamp",
     "event",
+    "session_elapsed_s",
     "voltage_v",
     "current_a",
     "power_w",
     "capacity_ah",
-    "elapsed_min",
+    "device_timer_min",
     "model_id",
     "model_name",
     "raw_frame_hex",
@@ -53,7 +54,12 @@ class StatusCsvLogger:
         self._writer = None
 
     def write(
-        self, status: EbcStatus, *, timestamp: datetime | None = None, event: str = "status"
+        self,
+        status: EbcStatus,
+        *,
+        timestamp: datetime | None = None,
+        event: str = "status",
+        session_elapsed_seconds: float | None = None,
     ) -> None:
         """Write and flush a status observation immediately."""
 
@@ -64,11 +70,14 @@ class StatusCsvLogger:
             (
                 observed_at.isoformat(timespec="seconds"),
                 event,
+                ""
+                if session_elapsed_seconds is None
+                else f"{max(0.0, session_elapsed_seconds):.3f}",
                 f"{status.voltage_volts:.3f}",
                 f"{status.current_amps:.3f}",
                 f"{status.power_watts:.3f}",
                 f"{status.capacity_ah:.3f}",
-                status.elapsed_minutes,
+                status.device_timer_minutes,
                 f"0x{status.model_id:02X}",
                 status.model_name,
                 status.raw.hex().upper(),

@@ -94,7 +94,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(status.current_amps, 0.7)
         self.assertEqual(status.voltage_volts, 12.0)
         self.assertEqual(status.capacity_ah, 0.1)
-        self.assertEqual(status.elapsed_minutes, 720)
+        self.assertEqual(status.device_timer_minutes, 720)
 
     def test_status_parser_rejects_bad_checksum(self) -> None:
         frame = bytearray(19)

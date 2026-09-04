@@ -10,7 +10,8 @@ from pathlib import Path
 
 from .protocol import (
     CONNECT,
-    STATUS_LENGTH,
+    EBC_A10H_MODEL_ID,
+    MODEL_NAMES,
     STOP,
     EbcStatus,
     make_cccv_charge_plan,
@@ -19,6 +20,9 @@ from .protocol import (
     make_lead_acid_charge_plan,
     parse_status,
 )
+
+
+SUPPORTED_MODEL_ID = EBC_A10H_MODEL_ID
 
 
 class DeviceError(RuntimeError):
@@ -35,6 +39,7 @@ class EbcDevice:
         self.timeout = timeout
         self._fd: int | None = None
         self._rx_buffer = bytearray()
+        self._control_active = False
 
     def __enter__(self) -> "EbcDevice":
         self.open()
@@ -77,17 +82,36 @@ class EbcDevice:
             attrs[6][termios.VTIME] = 0
             termios.tcsetattr(fd, termios.TCSANOW, attrs)
             termios.tcflush(fd, termios.TCIOFLUSH)
-        except termios.error as exc:
+        except (OSError, termios.error) as exc:
             os.close(fd)
             raise DeviceError(f"cannot configure {self.path}: {exc}") from exc
         self._fd = fd
         self._rx_buffer.clear()
+        self._control_active = False
 
     def close(self) -> None:
-        if self._fd is not None:
-            os.close(self._fd)
+        fd = self._fd
+        if fd is None:
+            self._rx_buffer.clear()
+            self._control_active = False
+            return
+
+        # Closing a port does not stop the tester. If this connection started
+        # a profile, make a best-effort stop before releasing the descriptor so
+        # serial errors and context-manager cleanup cannot strand a live load.
+        if self._control_active:
+            try:
+                self._write_all(STOP)
+            except (DeviceError, OSError):
+                pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        finally:
             self._fd = None
-        self._rx_buffer.clear()
+            self._rx_buffer.clear()
+            self._control_active = False
 
     def status(self) -> EbcStatus:
         """Request and decode one status frame without changing tester mode."""
@@ -136,10 +160,19 @@ class EbcDevice:
 
     def _begin_charge(self, frame: bytes) -> EbcStatus:
         self._require_open()
-        # This mirrors the upstream GUI's connection sequence exactly.
+        # CONNECT is a read-only status query, so identify the tester before
+        # sending STOP or a profile command to an unknown model.
+        self._require_supported_model(self.status())
+
+        # This mirrors the upstream GUI's connection sequence exactly after
+        # the model has been verified.
         self._write_all(STOP)
         self._write_all(CONNECT)
         baseline = parse_status(self._read_status_frame())
+        self._require_supported_model(baseline)
+        # Mark active before writing the profile: a partial write may still
+        # have reached the tester, and close() must then attempt STOP.
+        self._control_active = True
         self._write_all(frame)
         return baseline
 
@@ -147,7 +180,11 @@ class EbcDevice:
         """Immediately send the EBC stop frame."""
 
         self._require_open()
+        # STOP is the emergency path: do not require a status response or
+        # model identification first, since a stalled tester may be unable to
+        # answer. Profile-start commands still require a verified A10H model.
         self._write_all(STOP)
+        self._control_active = False
 
     def _write_all(self, data: bytes) -> None:
         assert self._fd is not None
@@ -158,6 +195,10 @@ class EbcDevice:
             except BlockingIOError:
                 self._wait_writable()
                 continue
+            except OSError as exc:
+                raise DeviceError(f"serial write failed on {self.path}: {exc}") from exc
+            if written <= 0:
+                raise DeviceError(f"serial write made no progress on {self.path}")
             view = view[written:]
 
     def _read_status_frame(self) -> bytes:
@@ -195,3 +236,12 @@ class EbcDevice:
     def _require_open(self) -> None:
         if self._fd is None:
             raise DeviceError("serial device is not open")
+
+    @staticmethod
+    def _require_supported_model(status: EbcStatus) -> EbcStatus:
+        if status.model_id != SUPPORTED_MODEL_ID:
+            model_name = MODEL_NAMES.get(status.model_id, f"unknown (0x{status.model_id:02X})")
+            raise DeviceError(
+                f"unsupported tester model: {model_name}; this CLI only controls EBC-A10H"
+            )
+        return status

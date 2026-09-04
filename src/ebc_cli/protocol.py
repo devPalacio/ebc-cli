@@ -7,6 +7,7 @@ prefix, excluding the checksum byte itself.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from functools import reduce
 from operator import xor
@@ -26,7 +27,8 @@ PB_AC_START = bytes.fromhex("FA6100000000000000F8")
 CCCV_START = bytes.fromhex("FA7100000000000000F8")
 CC_DISCHARGE_START = bytes.fromhex("FA0100000000000000F8")
 
-MODEL_NAMES = {0x06: "EBC-A10H"}
+EBC_A10H_MODEL_ID = 0x06
+MODEL_NAMES = {EBC_A10H_MODEL_ID: "EBC-A10H"}
 
 
 class ProtocolError(ValueError):
@@ -69,9 +71,16 @@ def encode_scaled(value: float, factor: float = 1.0) -> bytes:
     the tester protocol.
     """
 
-    if value < 0 or factor <= 0:
+    try:
+        numeric_value = float(value)
+        numeric_factor = float(factor)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ProtocolError("value and factor must be numeric") from exc
+    if not math.isfinite(numeric_value) or not math.isfinite(numeric_factor):
+        raise ProtocolError("value and factor must be finite")
+    if numeric_value < 0 or numeric_factor <= 0:
         raise ProtocolError("value must be non-negative and factor must be positive")
-    encoded = int(value * factor * 1000)
+    encoded = int(numeric_value * numeric_factor * 1000)
     high, remainder = divmod(encoded, 2400)
     low = remainder // 10
     if high > 0xFF or low > 0xFF:
@@ -82,15 +91,15 @@ def encode_scaled(value: float, factor: float = 1.0) -> bytes:
 def decode_current(data: bytes, factor: float = 1.0) -> float:
     """Decode the source controller's current representation in amperes."""
 
-    _validate_two_bytes(data, factor)
-    return (data[0] * 2400 + data[1] * 10) / 1000 / factor
+    numeric_factor = _validate_two_bytes(data, factor)
+    return (data[0] * 2400 + data[1] * 10) / 1000 / numeric_factor
 
 
 def decode_voltage(data: bytes, factor: float = 1.0) -> float:
     """Decode the source controller's voltage representation in volts."""
 
-    _validate_two_bytes(data, factor)
-    return (data[0] * 2400 + data[1] * 10) / 10000 / factor
+    numeric_factor = _validate_two_bytes(data, factor)
+    return (data[0] * 2400 + data[1] * 10) / 10000 / numeric_factor
 
 
 def decode_capacity(data: bytes) -> float:
@@ -103,6 +112,8 @@ def decode_capacity(data: bytes) -> float:
 def encode_timer(minutes: int) -> bytes:
     """Encode a timeout in minutes using the device's 240-minute high byte."""
 
+    if isinstance(minutes, bool) or not isinstance(minutes, int):
+        raise ProtocolError("timer must be an integer number of minutes")
     if not 0 <= minutes <= (0xFF * 240 + 0xFF):
         raise ProtocolError("timer is outside the EBC range")
     if minutes == 250:
@@ -168,9 +179,20 @@ class EbcStatus:
     voltage_volts: float
     current_amps: float
     capacity_ah: float
-    elapsed_minutes: int
+    device_timer_minutes: int
     model_id: int
     raw: bytes
+
+    @property
+    def elapsed_minutes(self) -> int:
+        """Read-only alias for callers using the old timer field name.
+
+        This is not host-side elapsed time. The tester's field has been
+        observed to use values that do not match wall-clock test duration, so
+        callers should use CSV timestamps for session timing.
+        """
+
+        return self.device_timer_minutes
 
     @property
     def model_name(self) -> str:
@@ -192,6 +214,8 @@ def parse_status(frame: bytes, *, current_factor: float = 1.0, voltage_factor: f
         raise ProtocolError(f"status must be {STATUS_LENGTH} bytes, got {len(frame)}")
     if frame[0] != FRAME_PREFIX:
         raise ProtocolError("status frame does not start with FA")
+    if frame[-1] != FRAME_SUFFIX:
+        raise ProtocolError("status frame does not end with F8")
     expected = checksum(frame, STATUS_CHECKSUM_INDEX)
     actual = frame[STATUS_CHECKSUM_INDEX]
     if actual != expected:
@@ -200,7 +224,7 @@ def parse_status(frame: bytes, *, current_factor: float = 1.0, voltage_factor: f
         current_amps=decode_current(frame[2:4], current_factor),
         voltage_volts=decode_voltage(frame[4:6], voltage_factor),
         capacity_ah=decode_capacity(frame[6:8]),
-        elapsed_minutes=decode_timer(frame[14:16]),
+        device_timer_minutes=decode_timer(frame[14:16]),
         model_id=frame[16],
         raw=frame,
     )
@@ -227,8 +251,13 @@ def find_valid_status_frame(data: bytes) -> bytes | None:
     return None
 
 
-def _validate_two_bytes(data: bytes, factor: float) -> None:
+def _validate_two_bytes(data: bytes, factor: float) -> float:
     if len(data) != 2:
         raise ProtocolError("measurement must contain exactly two bytes")
-    if factor <= 0:
-        raise ProtocolError("factor must be positive")
+    try:
+        numeric_factor = float(factor)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ProtocolError("factor must be numeric") from exc
+    if not math.isfinite(numeric_factor) or numeric_factor <= 0:
+        raise ProtocolError("factor must be finite and positive")
+    return numeric_factor

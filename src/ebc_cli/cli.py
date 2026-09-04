@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 import time
 from contextlib import nullcontext
@@ -12,6 +13,101 @@ from pathlib import Path
 from .csvlog import StatusCsvLogger
 from .device import DeviceError, EbcDevice
 from .protocol import EbcStatus, ProtocolError, make_lead_acid_charge_plan
+
+
+class _SessionSignal(Exception):
+    """A termination signal raised while a tester operation is supervised."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+class _SupervisedSession:
+    """Keep an active tester operation bounded and stop it on every exit path.
+
+    The tester is a stateful peripheral: closing the serial port does not stop
+    a charge or discharge already running on its own.  This small lifecycle
+    seam makes STOP best-effort on exceptions, Ctrl-C, SIGTERM, and normal
+    timeout/cutoff completion.
+    """
+
+    _SIGNALS = tuple(
+        signum
+        for signum in (
+            getattr(signal, "SIGINT", None),
+            getattr(signal, "SIGTERM", None),
+            getattr(signal, "SIGHUP", None),
+        )
+        if signum is not None
+    )
+
+    def __init__(self, tester: EbcDevice, logger: StatusCsvLogger | None):
+        self.tester = tester
+        self.logger = logger
+        self._active = False
+        self._stopping = False
+        self._old_handlers: dict[int, object] = {}
+
+    def __enter__(self) -> "_SupervisedSession":
+        for signum in self._SIGNALS:
+            try:
+                self._old_handlers[signum] = signal.signal(signum, self._handle_signal)
+            except (OSError, ValueError):
+                # signal.signal is only legal in the main thread.  Unit tests
+                # and embedders may run the CLI elsewhere; finally still
+                # provides cleanup for ordinary exceptions in that case.
+                continue
+        return self
+
+    def __exit__(self, exc_type: object, _exc: object, _traceback: object) -> None:
+        if self._active:
+            if exc_type is None:
+                event = "session-stop-sent"
+            elif isinstance(exc_type, type) and issubclass(exc_type, _SessionSignal):
+                event = "signal-stop-sent"
+            elif isinstance(exc_type, type) and issubclass(exc_type, KeyboardInterrupt):
+                event = "operator-interrupt-stop-sent"
+            else:
+                event = "error-stop-sent"
+            self.stop(event)
+        for signum, handler in self._old_handlers.items():
+            try:
+                signal.signal(signum, handler)
+            except (OSError, ValueError):
+                continue
+
+    def mark_started(self, event: str) -> None:
+        """Mark the operation live after its start frame has been sent."""
+
+        self._active = True
+        if self.logger is not None:
+            self.logger.write_event(event)
+
+    def stop(self, event: str, *, raise_errors: bool = False) -> bool:
+        """Send STOP once and record whether that attempt succeeded."""
+
+        if not self._active or self._stopping:
+            return True
+        self._stopping = True
+        try:
+            self.tester.stop()
+        except Exception:
+            if self.logger is not None:
+                self.logger.write_event(f"{event}-failed")
+            if raise_errors:
+                raise
+            return False
+        else:
+            if self.logger is not None:
+                self.logger.write_event(event)
+            return True
+        finally:
+            self._active = False
+
+    def _handle_signal(self, signum: int, _frame: object) -> None:
+        if not self._stopping:
+            raise _SessionSignal(signum)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -180,17 +276,26 @@ def main(argv: list[str] | None = None) -> int:
                 raise DeviceError("recovery timeout must be between 1 and 30 minutes")
             log_context, log_path = _command_log_context(args)
             with EbcDevice(args.device, args.timeout) as tester, log_context as logger:
-                baseline = tester.begin_lead_acid_recovery(
-                    current_amps=args.current, timeout_minutes=args.timeout_minutes
-                )
-                if logger is not None:
-                    logger.write(baseline, event="recovery-baseline")
-            print(
-                "Recovery started: PbAc, 6 cells, 14.4 V target, "
-                f"{args.current:.2f} A, {args.timeout_minutes}-minute hard timeout"
-            )
-            print("Baseline: ", end="")
-            _print_status(baseline)
+                with _SupervisedSession(tester, logger) as session:
+                    baseline = tester.begin_lead_acid_recovery(
+                        current_amps=args.current, timeout_minutes=args.timeout_minutes
+                    )
+                    if logger is not None:
+                        logger.write(baseline, event="recovery-baseline")
+                    session.mark_started("recovery-started")
+                    print(
+                        "Recovery started: PbAc, 6 cells, 14.4 V target, "
+                        f"{args.current:.2f} A, {args.timeout_minutes}-minute hard timeout"
+                    )
+                    print("Baseline: ", end="")
+                    _print_status(baseline)
+                    _run_active_session(
+                        session=session,
+                        tester=tester,
+                        logger=logger,
+                        timeout_minutes=args.timeout_minutes,
+                        sample_event="recovery-sample",
+                    )
             _report_log(log_path)
             return 0
 
@@ -205,19 +310,28 @@ def main(argv: list[str] | None = None) -> int:
                 raise DeviceError("float-charge timeout must be between 1 and 240 minutes")
             log_context, log_path = _command_log_context(args)
             with EbcDevice(args.device, args.timeout) as tester, log_context as logger:
-                baseline = tester.begin_float_charge(
-                    current_amps=args.current,
-                    voltage_volts=args.voltage,
-                    timeout_minutes=args.timeout_minutes,
-                )
-                if logger is not None:
-                    logger.write(baseline, event="float-charge-baseline")
-            print(
-                f"Float charge started: {args.voltage:.1f} V, {args.current:.2f} A limit, "
-                f"{args.timeout_minutes}-minute hard timeout"
-            )
-            print("Baseline: ", end="")
-            _print_status(baseline)
+                with _SupervisedSession(tester, logger) as session:
+                    baseline = tester.begin_float_charge(
+                        current_amps=args.current,
+                        voltage_volts=args.voltage,
+                        timeout_minutes=args.timeout_minutes,
+                    )
+                    if logger is not None:
+                        logger.write(baseline, event="float-charge-baseline")
+                    session.mark_started("float-charge-started")
+                    print(
+                        f"Float charge started: {args.voltage:.1f} V, {args.current:.2f} A limit, "
+                        f"{args.timeout_minutes}-minute hard timeout"
+                    )
+                    print("Baseline: ", end="")
+                    _print_status(baseline)
+                    _run_active_session(
+                        session=session,
+                        tester=tester,
+                        logger=logger,
+                        timeout_minutes=args.timeout_minutes,
+                        sample_event="float-charge-sample",
+                    )
             _report_log(log_path)
             return 0
 
@@ -232,40 +346,30 @@ def main(argv: list[str] | None = None) -> int:
                 raise DeviceError("capacity-test timeout must be between 1 and 2880 minutes")
             log_context, log_path = _command_log_context(args)
             with EbcDevice(args.device, args.timeout) as tester, log_context as logger:
-                baseline = tester.begin_constant_current_discharge(
-                    current_amps=args.current,
-                    cutoff_volts=args.cutoff_voltage,
-                    timeout_minutes=args.timeout_minutes,
-                )
-                if logger is not None:
-                    logger.write(baseline, event="capacity-test-baseline")
-                print(
-                    f"Capacity test started: {args.current:.2f} A to {args.cutoff_voltage:.1f} V, "
-                    f"{args.timeout_minutes}-minute hard timeout",
-                    flush=True,
-                )
-                _report_log(log_path)
-                try:
-                    while True:
-                        try:
-                            status = tester.next_status()
-                        except DeviceError:
-                            status = tester.status()
-                        _print_status(status)
-                        if logger is not None:
-                            logger.write(status, event="capacity-sample")
-                        # The bundled controller maps a CC discharge auto-off to 0x14.
-                        if status.raw[1] == 0x14:
-                            tester.stop()
-                            if logger is not None:
-                                logger.write_event("device-cutoff-stop-sent")
-                            print("Device cutoff reached; stop frame sent.", flush=True)
-                            return 0
-                except KeyboardInterrupt:
-                    tester.stop()
+                with _SupervisedSession(tester, logger) as session:
+                    baseline = tester.begin_constant_current_discharge(
+                        current_amps=args.current,
+                        cutoff_volts=args.cutoff_voltage,
+                        timeout_minutes=args.timeout_minutes,
+                    )
                     if logger is not None:
-                        logger.write_event("operator-interrupt-stop-sent")
-                    raise
+                        logger.write(baseline, event="capacity-test-baseline")
+                    session.mark_started("capacity-test-started")
+                    print(
+                        f"Capacity test started: {args.current:.2f} A to {args.cutoff_voltage:.1f} V, "
+                        f"{args.timeout_minutes}-minute hard timeout",
+                        flush=True,
+                    )
+                    _report_log(log_path)
+                    _run_active_session(
+                        session=session,
+                        tester=tester,
+                        logger=logger,
+                        timeout_minutes=args.timeout_minutes,
+                        sample_event="capacity-sample",
+                        stop_on_cutoff=True,
+                    )
+            return 0
 
         if args.command == "stop":
             if not args.execute:
@@ -309,6 +413,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Logged {samples} sample(s)")
             _report_log(log_path)
             return 0
+    except _SessionSignal as exc:
+        return 128 + exc.signum
     except (DeviceError, ProtocolError) as exc:
         print(f"ebc: {exc}", file=sys.stderr)
         return 2
@@ -322,7 +428,71 @@ def _print_status(status: EbcStatus) -> None:
     print(
         f"{status.model_name}: {status.voltage_volts:.3f} V  "
         f"{status.current_amps:.3f} A  {status.power_watts:.3f} W  "
-        f"{status.capacity_ah:.3f} Ah  {status.elapsed_minutes} min"
-        ,
+        f"{status.capacity_ah:.3f} Ah  device timer {status.device_timer_minutes} min",
         flush=True,
     )
+
+
+def _read_live_status(tester: EbcDevice) -> EbcStatus:
+    """Read a status update, falling back to an explicit poll if needed."""
+
+    try:
+        return tester.next_status()
+    except DeviceError:
+        # Some firmware revisions only emit status after CONNECT.  Keeping the
+        # fallback here lets a supervised session log both variants while still
+        # surfacing a second failure to the lifecycle guard.
+        return tester.status()
+
+
+def _run_active_session(
+    *,
+    session: _SupervisedSession,
+    tester: EbcDevice,
+    logger: StatusCsvLogger | None,
+    timeout_minutes: int,
+    sample_event: str,
+    stop_on_cutoff: bool = False,
+    poll_interval: float = 1.0,
+    clock=time.monotonic,
+    sleeper=time.sleep,
+) -> None:
+    """Log live status until cutoff or timeout, stopping the tester on exit."""
+
+    session_started = clock()
+    deadline = session_started + timeout_minutes * 60
+    samples = 0
+    while True:
+        if clock() >= deadline:
+            session.stop("timeout-stop-sent", raise_errors=True)
+            print("Hard timeout reached; stop frame sent.", flush=True)
+            print(f"Logged {samples} active sample(s)", flush=True)
+            return
+
+        status = _read_live_status(tester)
+        _print_status(status)
+        if logger is not None:
+            logger.write(
+                status,
+                event=sample_event,
+                session_elapsed_seconds=clock() - session_started,
+            )
+        samples += 1
+
+        # The bundled controller maps a CC discharge auto-off to 0x14.  This
+        # signal is meaningful for capacity tests; charge modes remain bounded
+        # by their configured timeout because their firmware completion codes
+        # vary between revisions.
+        if stop_on_cutoff and status.raw[1] == 0x14:
+            session.stop("device-cutoff-stop-sent", raise_errors=True)
+            print("Device cutoff reached; stop frame sent.", flush=True)
+            print(f"Logged {samples} active sample(s)", flush=True)
+            return
+
+        remaining = deadline - clock()
+        if remaining <= 0:
+            session.stop("timeout-stop-sent", raise_errors=True)
+            print("Hard timeout reached; stop frame sent.", flush=True)
+            print(f"Logged {samples} active sample(s)", flush=True)
+            return
+        sleeper(min(poll_interval, remaining))

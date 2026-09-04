@@ -4,8 +4,19 @@ version = "0.1.0"
 description = "A cautious terminal interface for ZKETECH EBC battery testers"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [{ name = "Jay" }]
+keywords = ["battery", "electronics", "serial", "ZKETECH", "EBC-A10H"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: System :: Hardware",
+]
 
 [project.scripts]
 ebc = "ebc_cli.cli:main"
