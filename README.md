@@ -141,3 +141,6 @@ firmware responses report a non-wall-clock timer value.
 ## License
 
 This project is released under the MIT License; see [LICENSE](LICENSE).
+
+See [ROADMAP.md](ROADMAP.md) for planned protocol, measurement, and CLI
+features.
