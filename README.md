@@ -21,6 +21,8 @@ control profile with another model until its protocol has been checked.
 - `capacity-test` runs a low-rate constant-current discharge and keeps
   recording samples until the tester reaches its cutoff or the safety timeout.
 - `stop --execute` sends the immediate EBC stop frame.
+- `report` replays a CSV session without connecting to the tester and reports
+  host-integrated Ah/Wh totals.
 
 Commands that communicate with the tester automatically create a timestamped
 CSV session in `~/ebc-logs` (or the directory supplied with `--log-dir`). Use
@@ -30,6 +32,9 @@ written so a live test remains useful if it is interrupted.
 
 When an active command finishes, it prints the stop reason, elapsed host time,
 sample count, and the last decoded tester status when one was received.
+Active sessions also calculate independent host-side Ah and Wh totals using
+trapezoidal integration of the sampled current and voltage. Intervals longer
+than 30 seconds are skipped and called out in the summary rather than guessed.
 
 The existing GUI must be closed before using a serial command: two programs
 must not read from the tester's one serial port at the same time. Commands that
@@ -126,6 +131,12 @@ Stop the tester:
 ebc stop --execute
 ```
 
+Summarize a completed session without hardware:
+
+```bash
+ebc report ~/ebc-logs/20260903-223424_capacity-test.csv
+```
+
 Run the test suite from a checkout with:
 
 ```bash
@@ -150,6 +161,28 @@ The CSV column `session_elapsed_s` is the CLI's monotonic elapsed time for
 active sessions. The separate `device_timer_min` column is the timer field
 reported by the tester; it is not used as the session clock because some
 firmware responses report a non-wall-clock timer value.
+
+The model registry currently contains only the validated EBC-A10H behavior.
+Unknown model IDs remain readable for diagnostics, but control profiles reject
+them until their serial settings and packet behavior have been verified.
+
+### CSV schema
+
+The current CSV schema is version `1`. A newly created file keeps the stable
+11-column header shown below, followed by one metadata row whose `event` is
+`schema-v1`; all other fields in that row are empty:
+
+```text
+timestamp,event,session_elapsed_s,voltage_v,current_a,power_w,capacity_ah,device_timer_min,model_id,model_name,raw_frame_hex
+2026-09-03T20:00:00-04:00,schema-v1,,,,,,,,,
+```
+
+Status rows have `event=status` or a profile-specific sample event and include
+`raw_frame_hex`. Command lifecycle rows have an event name and blank
+measurement fields. Readers should ignore metadata and lifecycle rows when
+building a measurement series. Files created before schema markers were added
+have the same header and are treated as legacy schema `0`; the logger appends
+to them without rewriting or adding a marker.
 
 ## License
 

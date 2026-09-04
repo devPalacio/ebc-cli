@@ -66,9 +66,10 @@ class ResourceTests(unittest.TestCase):
             with resources.log_path.open(newline="", encoding="utf-8") as log_file:
                 rows = list(csv.reader(log_file))
 
-        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0][0], "timestamp")
         self.assertEqual(rows[0][1], "event")
+        self.assertEqual(rows[1][1], "schema-v1")
 
 
 def _tester_mock() -> MagicMock:

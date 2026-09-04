@@ -11,6 +11,7 @@ from .profiles import (
     make_recovery_profile,
 )
 from .protocol import EbcStatus, make_lead_acid_charge_plan
+from .report import format_report, load_replay_log, summarize_replay_log
 from .resources import command_resources
 from .session import (
     SessionResult,
@@ -32,6 +33,7 @@ def execute_command(args: argparse.Namespace) -> int:
         "stop": handle_stop,
         "status": handle_status,
         "monitor": handle_monitor,
+        "report": handle_report,
     }
     return handlers[args.command](args)
 
@@ -146,6 +148,18 @@ def _report_session_result(result: SessionResult) -> None:
     if result.final_status is not None:
         print("Terminal: ", end="")
         print_status(result.final_status)
+    if result.measurement is not None:
+        print(
+            f"Host integration: {result.measurement.amp_hours:.3f} Ah, "
+            f"{result.measurement.watt_hours:.3f} Wh",
+            flush=True,
+        )
+        if result.measurement.skipped_intervals:
+            print(
+                f"Skipped {result.measurement.skipped_intervals} interval(s) over "
+                f"{result.measurement.skipped_seconds:.1f} s",
+                flush=True,
+            )
 
 
 def handle_stop(args: argparse.Namespace) -> int:
@@ -185,6 +199,14 @@ def handle_monitor(args: argparse.Namespace) -> int:
         )
     print(f"Logged {result.samples} sample(s)")
     _report_log(resources.log_path)
+    return 0
+
+
+def handle_report(args: argparse.Namespace) -> int:
+    """Replay one CSV session and print its read-only measurement summary."""
+
+    log = load_replay_log(args.path)
+    print(format_report(summarize_replay_log(log)))
     return 0
 
 

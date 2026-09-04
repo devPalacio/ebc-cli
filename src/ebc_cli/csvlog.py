@@ -1,4 +1,9 @@
-"""Durable CSV recording of decoded EBC status samples."""
+"""Durable CSV recording of decoded EBC status samples.
+
+The header is intentionally stable. New files add a schema-vN metadata event
+after the header so readers can identify the format without changing the
+columns expected by older CSV consumers.
+"""
 
 import csv
 from datetime import datetime
@@ -6,6 +11,10 @@ from pathlib import Path
 from typing import Self, TextIO
 
 from .protocol import EbcStatus
+
+CSV_SCHEMA_VERSION = 1
+LEGACY_CSV_SCHEMA_VERSION = 0
+CSV_SCHEMA_EVENT_PREFIX = "schema-v"
 
 CSV_HEADER = (
     "timestamp",
@@ -22,11 +31,36 @@ CSV_HEADER = (
 )
 
 
+def schema_event(version: int = CSV_SCHEMA_VERSION) -> str:
+    """Return the metadata event used to identify a CSV schema version."""
+
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError("CSV schema version must be a positive integer")
+    return f"{CSV_SCHEMA_EVENT_PREFIX}{version}"
+
+
+def schema_version_from_event(event: str) -> int | None:
+    """Decode a schema metadata event, or return ``None`` for normal events.
+
+    Files written before schema markers were introduced have implicit
+    :data:`LEGACY_CSV_SCHEMA_VERSION` and do not produce a marker event.
+    """
+
+    if not event.startswith(CSV_SCHEMA_EVENT_PREFIX):
+        return None
+    version_text = event.removeprefix(CSV_SCHEMA_EVENT_PREFIX)
+    if not version_text.isdigit() or int(version_text) < 1:
+        raise ValueError(f"invalid CSV schema event: {event!r}")
+    return int(version_text)
+
+
 class StatusCsvLogger:
     """Append flushed status records to a CSV file.
 
     Each row includes the raw protocol frame so a capacity-test record remains
     useful even if a later decoder improvement changes an interpreted field.
+    New files begin with a schema metadata row; existing legacy files are
+    appended without being rewritten.
     """
 
     def __init__(self, path: str | Path):
@@ -41,6 +75,13 @@ class StatusCsvLogger:
         self._writer = csv.writer(self._file)
         if needs_header:
             self._writer.writerow(CSV_HEADER)
+            self._writer.writerow(
+                (
+                    datetime.now().astimezone().isoformat(timespec="seconds"),
+                    schema_event(),
+                    *("" for _ in CSV_HEADER[2:]),
+                )
+            )
             self._file.flush()
         return self
 

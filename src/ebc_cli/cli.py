@@ -7,6 +7,7 @@ from .device import DeviceError
 from .parser import build_parser
 from .profiles import ProfileError
 from .protocol import ProtocolError
+from .report import ReportError
 from .session import _SessionSignal
 
 
@@ -18,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
         return execute_command(args)
     except _SessionSignal as exc:
         return 128 + exc.signum
-    except (DeviceError, ProfileError, ProtocolError) as exc:
+    except (DeviceError, ProfileError, ProtocolError, ReportError) as exc:
         print(f"ebc: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

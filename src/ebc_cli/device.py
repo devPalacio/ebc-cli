@@ -9,15 +9,12 @@ from pathlib import Path
 from typing import Self
 
 from .protocol import (
-    CONNECT,
     EBC_A10H_MODEL_ID,
-    MODEL_NAMES,
-    STOP,
+    EbcModel,
+    EbcProfile,
     EbcStatus,
     find_valid_status_frame,
-    make_cccv_charge_plan,
-    make_constant_current_discharge_plan,
-    make_lead_acid_charge_plan,
+    get_model,
     parse_status,
 )
 
@@ -37,12 +34,20 @@ class EbcDevice:
         timeout: float = 1.0,
         *,
         lock_device: bool = True,
+        model: EbcModel | None = None,
     ):
         if timeout <= 0:
             raise DeviceError("timeout must be greater than zero")
         self.path = Path(path)
         self.timeout = timeout
         self.lock_device = lock_device
+        self.model = model or get_model(EBC_A10H_MODEL_ID)
+        if self.model is None:  # pragma: no cover - registry invariant
+            raise DeviceError("the default EBC-A10H model is not registered")
+        if get_model(self.model.model_id) is not self.model:
+            raise DeviceError(
+                f"model {self.model.name} is not registered; register it before opening a device"
+            )
         self._fd: int | None = None
         self._rx_buffer = bytearray()
         self._control_active = False
@@ -55,7 +60,7 @@ class EbcDevice:
         self.close()
 
     def open(self) -> None:
-        """Open and configure the port as 9600 baud, 8 data bits, even parity."""
+        """Open and configure the port using the selected model's settings."""
 
         if self._fd is not None:
             return
@@ -86,14 +91,36 @@ class EbcDevice:
             cflags &= ~getattr(termios, "CRTSCTS", 0)
             cflags &= ~termios.PARODD
             cflags |= termios.CS8 | termios.CREAD | termios.CLOCAL | termios.PARENB
+            serial = self.model.serial
+            baudrate = getattr(termios, f"B{serial.baudrate}", None)
+            if baudrate is None:
+                raise DeviceError(f"unsupported baudrate for {self.model.name}: {serial.baudrate}")
+            data_bits = getattr(termios, f"CS{serial.data_bits}", None)
+            if data_bits is None:
+                raise DeviceError(
+                    f"unsupported data width for {self.model.name}: {serial.data_bits}"
+                )
+            cflags &= ~termios.CSIZE
+            cflags |= data_bits
+            cflags &= ~(termios.PARENB | termios.PARODD)
+            parity = serial.parity.casefold()
+            if parity == "even":
+                cflags |= termios.PARENB
+            elif parity == "odd":
+                cflags |= termios.PARENB | termios.PARODD
+            if serial.stop_bits == 2:
+                cflags |= termios.CSTOPB
             attrs[2] = cflags
             attrs[3] = 0  # local flags: raw
-            attrs[4] = termios.B9600
-            attrs[5] = termios.B9600
+            attrs[4] = baudrate
+            attrs[5] = baudrate
             attrs[6][termios.VMIN] = 0
             attrs[6][termios.VTIME] = 0
             termios.tcsetattr(fd, termios.TCSANOW, attrs)
             termios.tcflush(fd, termios.TCIOFLUSH)
+        except DeviceError:
+            os.close(fd)
+            raise
         except (OSError, termios.error) as exc:
             os.close(fd)
             raise DeviceError(f"cannot configure {self.path}: {exc}") from exc
@@ -113,7 +140,7 @@ class EbcDevice:
         # serial errors and context-manager cleanup cannot strand a live load.
         if self._control_active:
             try:
-                self._write_all(STOP)
+                self._write_all(self.model.stop_packet)
             except DeviceError, OSError:
                 pass
         try:
@@ -129,40 +156,42 @@ class EbcDevice:
         """Request and decode one status frame without changing tester mode."""
 
         self._require_open()
-        self._write_all(CONNECT)
+        self._write_all(self.model.connect_packet)
         return parse_status(self._read_status_frame())
 
     def begin_lead_acid_recovery(self, *, current_amps: float, timeout_minutes: int) -> EbcStatus:
         """Establish a safe baseline, then start a supervised PbAc charge."""
 
-        frame = make_lead_acid_charge_plan(
-            current_amps=current_amps, cells=6, timeout_minutes=timeout_minutes
+        return self._begin_profile(
+            EbcProfile.LEAD_ACID_CHARGE,
+            current_amps=current_amps,
+            cells=6,
+            timeout_minutes=timeout_minutes,
         )
-        return self._begin_charge(frame)
 
     def begin_float_charge(
         self, *, current_amps: float, voltage_volts: float, timeout_minutes: int
     ) -> EbcStatus:
         """Establish a safe baseline, then start a CCCV float-charge profile."""
 
-        frame = make_cccv_charge_plan(
+        return self._begin_profile(
+            EbcProfile.CCCV_CHARGE,
             current_amps=current_amps,
             voltage_volts=voltage_volts,
             timeout_minutes=timeout_minutes,
         )
-        return self._begin_charge(frame)
 
     def begin_constant_current_discharge(
         self, *, current_amps: float, cutoff_volts: float, timeout_minutes: int
     ) -> EbcStatus:
         """Establish a safe baseline, then start a CC discharge."""
 
-        frame = make_constant_current_discharge_plan(
+        return self._begin_profile(
+            EbcProfile.CONSTANT_CURRENT_DISCHARGE,
             current_amps=current_amps,
             cutoff_volts=cutoff_volts,
             timeout_minutes=timeout_minutes,
         )
-        return self._begin_charge(frame)
 
     def next_status(self) -> EbcStatus:
         """Read the tester's next unsolicited status frame."""
@@ -170,16 +199,17 @@ class EbcDevice:
         self._require_open()
         return parse_status(self._read_status_frame())
 
-    def _begin_charge(self, frame: bytes) -> EbcStatus:
+    def _begin_profile(self, profile: EbcProfile, **kwargs: object) -> EbcStatus:
         self._require_open()
         # CONNECT is a read-only status query, so identify the tester before
         # sending STOP or a profile command to an unknown model.
         self._require_supported_model(self.status())
+        frame = self.model.build_profile(profile, **kwargs)
 
         # This mirrors the upstream GUI's connection sequence exactly after
         # the model has been verified.
-        self._write_all(STOP)
-        self._write_all(CONNECT)
+        self._write_all(self.model.stop_packet)
+        self._write_all(self.model.connect_packet)
         baseline = parse_status(self._read_status_frame())
         self._require_supported_model(baseline)
         # Mark active before writing the profile: a partial write may still
@@ -195,7 +225,7 @@ class EbcDevice:
         # STOP is the emergency path: do not require a status response or
         # model identification first, since a stalled tester may be unable to
         # answer. Profile-start commands still require a verified A10H model.
-        self._write_all(STOP)
+        self._write_all(self.model.stop_packet)
         self._control_active = False
 
     def _write_all(self, data: bytes) -> None:
@@ -261,11 +291,14 @@ class EbcDevice:
         if self._fd is None:
             raise DeviceError("serial device is not open")
 
-    @staticmethod
-    def _require_supported_model(status: EbcStatus) -> EbcStatus:
-        if status.model_id != SUPPORTED_MODEL_ID:
-            model_name = MODEL_NAMES.get(status.model_id, f"unknown (0x{status.model_id:02X})")
+    def _require_supported_model(self, status: EbcStatus) -> EbcModel:
+        model = get_model(status.model_id)
+        if model is None or not model.supports_control:
             raise DeviceError(
-                f"unsupported tester model: {model_name}; this CLI only controls EBC-A10H"
+                f"unsupported tester model: {status.model_name}; this CLI has no validated control profile"
             )
-        return status
+        if model.model_id != self.model.model_id:
+            raise DeviceError(
+                f"tester reported {model.name}, but this connection is configured for {self.model.name}"
+            )
+        return model

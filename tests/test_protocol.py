@@ -5,7 +5,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ebc_cli.cli import main
-from ebc_cli.csvlog import CSV_HEADER, StatusCsvLogger
+from ebc_cli.csvlog import (
+    CSV_HEADER,
+    CSV_SCHEMA_VERSION,
+    StatusCsvLogger,
+    schema_event,
+    schema_version_from_event,
+)
 from ebc_cli.device import DeviceError, EbcDevice
 from ebc_cli.protocol import (
     CONNECT,
@@ -39,9 +45,11 @@ class ProtocolTests(unittest.TestCase):
             with path.open(newline="", encoding="utf-8") as csv_file:
                 rows = list(csv.reader(csv_file))
         self.assertEqual(tuple(rows[0]), CSV_HEADER)
-        self.assertEqual(rows[1][0], "2026-09-03T20:00:00+00:00")
-        self.assertEqual(rows[1][1], "status")
-        self.assertEqual(rows[1][-1], status.raw.hex().upper())
+        self.assertEqual(rows[1][1], schema_event())
+        self.assertEqual(schema_version_from_event(rows[1][1]), CSV_SCHEMA_VERSION)
+        self.assertEqual(rows[2][0], "2026-09-03T20:00:00+00:00")
+        self.assertEqual(rows[2][1], "status")
+        self.assertEqual(rows[2][-1], status.raw.hex().upper())
 
     def test_csv_logger_writes_event_row(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -50,8 +58,30 @@ class ProtocolTests(unittest.TestCase):
                 logger.write_event("stop-sent", timestamp=datetime(2026, 9, 3, 20, 0, tzinfo=UTC))
             with path.open(newline="", encoding="utf-8") as csv_file:
                 rows = list(csv.reader(csv_file))
-        self.assertEqual(rows[1][1], "stop-sent")
-        self.assertTrue(all(value == "" for value in rows[1][2:]))
+        self.assertEqual(rows[2][1], "stop-sent")
+        self.assertTrue(all(value == "" for value in rows[2][2:]))
+
+    def test_legacy_csv_without_marker_remains_appendable(self) -> None:
+        status = parse_status(_status_frame())
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "legacy.csv"
+            with path.open("w", newline="", encoding="utf-8") as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(CSV_HEADER)
+                writer.writerow(
+                    ("2026-09-03T20:00:00+00:00", "legacy", *("" for _ in CSV_HEADER[2:]))
+                )
+            with StatusCsvLogger(path) as logger:
+                logger.write(status, timestamp=datetime(2026, 9, 3, 20, 1, tzinfo=UTC))
+            with path.open(newline="", encoding="utf-8") as csv_file:
+                rows = list(csv.reader(csv_file))
+
+        self.assertEqual(tuple(rows[0]), CSV_HEADER)
+        self.assertEqual(rows[1][1], "legacy")
+        self.assertEqual(rows[2][1], "status")
+
+    def test_non_schema_events_are_not_treated_as_schema_markers(self) -> None:
+        self.assertIsNone(schema_version_from_event("status"))
 
     def test_known_connect_packet_is_already_valid(self) -> None:
         self.assertEqual(CONNECT.hex().upper(), "FA0500000000000005F8")

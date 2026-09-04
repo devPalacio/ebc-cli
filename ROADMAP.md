@@ -17,6 +17,11 @@ Completed in the current `0.1.x` baseline:
   serial failure paths.
 - Final active-session summaries with stop reason, elapsed duration, sample
   count, and the last decoded tester status.
+- Independent host-side Ah and Wh integration with conservative gap handling.
+- Versioned CSV schema metadata and a replayable, sanitized A10H fixture.
+- Read-only CSV replay and reporting for offline capacity summaries.
+- A model registry that keeps A10H serial settings, scaling, and profile
+  packets together while leaving unverified models read-only.
 - Typed, validated charge and discharge profile objects shared by the CLI
   handlers.
 - Semantic completion reasons for the known A10H capacity cutoff status.
@@ -35,22 +40,24 @@ Completed in the current `0.1.x` baseline:
 - [x] Add pseudo-terminal integration tests for serial framing, partial reads,
   timeouts, disconnects, and stop-on-cleanup behavior.
 - [ ] Capture and replay real A10H sessions in tests, including both parity and
-  checksum variants encountered in the field.
-- [ ] Compute host-side Ah and Wh independently from sampled current, voltage,
+  checksum variants encountered in the field. A deterministic synthetic
+  fixture and replay validation are now included; real hardware captures are
+  still outstanding.
+- [x] Compute host-side Ah and Wh independently from sampled current, voltage,
   and monotonic elapsed time.
 
 ## Measurement and analysis
 
-- [ ] Add a read-only `report` command for summarizing a CSV capacity run.
-- [ ] Add a replay adapter so logs can be inspected without the tester
+- [x] Add a read-only `report` command for summarizing a CSV capacity run.
+- [x] Add a replay adapter so logs can be inspected without the tester
   connected.
-- [ ] Define a documented CSV schema/version and a compatibility exporter for
-  the original GUI's simpler CSV format.
+- [x] Define a documented CSV schema/version.
+- [ ] Add a compatibility exporter for the original GUI's simpler CSV format.
 - [ ] Add optional JSON output for scripts and monitoring systems.
 
 ## Protocol and device coverage
 
-- [ ] Move model-specific serial settings, scaling factors, and connection
+- [x] Move model-specific serial settings, scaling factors, and connection
   packets into a model registry.
 - [ ] Validate support for EBC-A05 and document its current scaling before
   enabling control commands for it.

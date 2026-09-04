@@ -90,15 +90,18 @@ class CliSafetyTests(unittest.TestCase):
         self.assertEqual(result.samples, 1)
         self.assertEqual(result.elapsed_seconds, 60.0)
         self.assertIs(result.final_status, expected_final_status)
+        self.assertIsNotNone(result.measurement)
+        self.assertEqual(result.measurement.sample_count, 1)
+        self.assertEqual(result.measurement.amp_hours, 0.0)
         self.assertEqual(
-            [row[1] for row in rows[1:]],
+            [row[1] for row in rows[2:]],
             [
                 "test-started",
                 "test-sample",
                 "timeout-stop-sent",
             ],
         )
-        self.assertEqual(rows[2][2], "0.000")
+        self.assertEqual(rows[3][2], "0.000")
 
     def test_active_session_stops_after_serial_error(self) -> None:
         tester = FakeTester([DeviceError("serial read failed")])
@@ -147,7 +150,32 @@ class CliSafetyTests(unittest.TestCase):
         self.assertEqual(result.stop_reason, session.SessionStopReason.DEVICE_CUTOFF)
         self.assertEqual(result.samples, 1)
         self.assertIs(result.final_status, expected_final_status)
+        self.assertIsNotNone(result.measurement)
         self.assertEqual(tester.stop_calls, 1)
+
+    def test_active_session_accumulates_host_measurements(self) -> None:
+        tester = FakeTester([_status(), _status(state=0x14)])
+        clock = FakeClock()
+        with session.SupervisedSession(tester, None) as supervised:
+            supervised.mark_started("test-started")
+            result = session.run_active_session(
+                session=supervised,
+                tester=tester,
+                logger=None,
+                printer=lambda _status: None,
+                timeout_minutes=1,
+                sample_event="test-sample",
+                clock=clock,
+                sleeper=clock.sleep,
+                stop_on_cutoff=True,
+                poll_interval=1.0,
+            )
+
+        self.assertIsNotNone(result.measurement)
+        self.assertEqual(result.measurement.sample_count, 2)
+        self.assertEqual(result.measurement.integrated_intervals, 1)
+        self.assertAlmostEqual(result.measurement.amp_hours, 0.7 / 3600)
+        self.assertAlmostEqual(result.measurement.watt_hours, 8.4 / 3600)
 
     def test_active_session_without_samples_has_no_terminal_status(self) -> None:
         tester = FakeTester()
@@ -165,6 +193,8 @@ class CliSafetyTests(unittest.TestCase):
             )
 
         self.assertIsNone(result.final_status)
+        self.assertIsNotNone(result.measurement)
+        self.assertEqual(result.measurement.sample_count, 0)
         self.assertEqual(result.stop_reason, session.SessionStopReason.TIMEOUT)
 
     def test_session_result_reports_terminal_snapshot(self) -> None:
@@ -176,6 +206,19 @@ class CliSafetyTests(unittest.TestCase):
                     samples=4,
                     elapsed_seconds=123.4,
                     final_status=_status(state=0x14),
+                    measurement=session.MeasurementSummary(
+                        sample_count=4,
+                        integrated_intervals=3,
+                        elapsed_seconds=123.4,
+                        integrated_seconds=123.4,
+                        amp_hours=1.25,
+                        watt_hours=15.0,
+                        skipped_intervals=0,
+                        skipped_seconds=0.0,
+                        ignored_samples=0,
+                        first_timestamp=0.0,
+                        last_timestamp=123.4,
+                    ),
                 )
             )
 
@@ -183,6 +226,7 @@ class CliSafetyTests(unittest.TestCase):
         self.assertIn("Device cutoff reached; stop frame sent.", rendered)
         self.assertIn("Session: 123.4 s, 4 active sample(s)", rendered)
         self.assertIn("Terminal: EBC-A10H: 12.000 V", rendered)
+        self.assertIn("Host integration: 1.250 Ah, 15.000 Wh", rendered)
 
     def test_monitor_session_stops_after_requested_count(self) -> None:
         tester = FakeTester([_status(), _status()])
@@ -265,8 +309,8 @@ class CliSafetyTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(run_session.call_count, 1)
         self.assertEqual(tester.stop_calls, 1)
-        self.assertEqual(rows[1][1], "recovery-baseline")
-        self.assertEqual(rows[2][1], "recovery-started")
+        self.assertEqual(rows[2][1], "recovery-baseline")
+        self.assertEqual(rows[3][1], "recovery-started")
 
 
 def _status(*, state: int = 0x68) -> EbcStatus:

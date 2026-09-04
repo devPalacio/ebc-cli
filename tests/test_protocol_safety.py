@@ -80,7 +80,7 @@ class ProtocolSafetyTests(unittest.TestCase):
         device._write_all = Mock()
         device._read_status_frame = Mock(return_value=status_frame(model_id=0x99))
 
-        with self.assertRaisesRegex(DeviceError, "only controls EBC-A10H"):
+        with self.assertRaisesRegex(DeviceError, "validated control profile"):
             device.begin_float_charge(current_amps=0.5, voltage_volts=13.7, timeout_minutes=120)
 
         device._write_all.assert_called_once_with(CONNECT)

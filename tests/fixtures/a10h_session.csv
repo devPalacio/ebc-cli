@@ -1,0 +1,6 @@
+timestamp,event,session_elapsed_s,voltage_v,current_a,power_w,capacity_ah,device_timer_min,model_id,model_name,raw_frame_hex
+2026-09-03T20:00:00-04:00,schema-v1,,,,,,,,,
+2026-09-03T20:00:00-04:00,capacity-baseline,0.000,12.600,0.800,10.080,0.000,0,0x06,EBC-A10H,FA6800503478000000000000000000000672F8
+2026-09-03T20:00:05-04:00,capacity-sample,5.000,12.300,0.800,9.840,0.200,5,0x06,EBC-A10H,FA680050333C00C80000000000000005060CF8
+2026-09-03T20:00:10-04:00,capacity-sample,10.000,10.500,0.000,0.000,6.400,120,0x06,EBC-A10H,FA1400002BB41AA00000000000000078064FF8
+2026-09-03T20:00:10-04:00,device-cutoff-stop-sent,,,,,,,,,

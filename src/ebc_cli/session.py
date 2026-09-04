@@ -8,6 +8,7 @@ from enum import StrEnum
 from typing import Protocol, Self
 
 from .device import DeviceError
+from .measurement import MeasurementAccumulator, MeasurementSummary
 from .protocol import EbcCompletionReason, EbcStatus
 
 
@@ -50,6 +51,7 @@ class SessionResult:
     samples: int
     elapsed_seconds: float
     final_status: EbcStatus | None = None
+    measurement: MeasurementSummary | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +187,7 @@ def run_active_session(
     deadline = session_started + timeout_minutes * 60
     samples = 0
     final_status: EbcStatus | None = None
+    accounting = MeasurementAccumulator()
     while True:
         if clock() >= deadline:
             return _finish_session(
@@ -195,16 +198,19 @@ def run_active_session(
                 session_started=session_started,
                 clock=clock,
                 final_status=final_status,
+                accounting=accounting,
             )
 
         status = read_live_status(tester)
         final_status = status
+        sample_elapsed = clock() - session_started
+        accounting.add(status, sample_elapsed)
         printer(status)
         if logger is not None:
             logger.write(
                 status,
                 event=sample_event,
-                session_elapsed_seconds=clock() - session_started,
+                session_elapsed_seconds=sample_elapsed,
             )
         samples += 1
 
@@ -219,6 +225,7 @@ def run_active_session(
                 session_started=session_started,
                 clock=clock,
                 final_status=final_status,
+                accounting=accounting,
             )
 
         remaining = deadline - clock()
@@ -231,6 +238,7 @@ def run_active_session(
                 session_started=session_started,
                 clock=clock,
                 final_status=final_status,
+                accounting=accounting,
             )
         sleeper(min(poll_interval, remaining))
 
@@ -244,6 +252,7 @@ def _finish_session(
     session_started: float,
     clock: Callable[[], float],
     final_status: EbcStatus | None,
+    accounting: MeasurementAccumulator,
 ) -> SessionResult:
     session.stop(stop_event, raise_errors=True)
     return SessionResult(
@@ -251,6 +260,7 @@ def _finish_session(
         samples=samples,
         elapsed_seconds=max(0.0, clock() - session_started),
         final_status=final_status,
+        measurement=accounting.summary,
     )
 
 

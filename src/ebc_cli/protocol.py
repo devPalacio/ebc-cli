@@ -6,7 +6,8 @@ prefix, excluding the checksum byte itself.
 """
 
 import math
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import reduce
 from operator import xor
@@ -26,7 +27,6 @@ CCCV_START = bytes.fromhex("FA7100000000000000F8")
 CC_DISCHARGE_START = bytes.fromhex("FA0100000000000000F8")
 
 EBC_A10H_MODEL_ID = 0x06
-MODEL_NAMES = {EBC_A10H_MODEL_ID: "EBC-A10H"}
 
 
 class EbcCompletionReason(StrEnum):
@@ -40,6 +40,112 @@ _COMPLETION_REASONS = {0x14: EbcCompletionReason.CAPACITY_CUTOFF}
 
 class ProtocolError(ValueError):
     """The tester sent an incomplete or invalid protocol frame."""
+
+
+class EbcProfile(StrEnum):
+    """Profile packet families understood by a registered tester model."""
+
+    LEAD_ACID_CHARGE = "lead-acid-charge"
+    CCCV_CHARGE = "cccv-charge"
+    CONSTANT_CURRENT_DISCHARGE = "constant-current-discharge"
+
+
+@dataclass(frozen=True, slots=True)
+class EbcSerialSettings:
+    """Serial line settings required by one EBC model."""
+
+    baudrate: int = 9600
+    data_bits: int = 8
+    parity: str = "even"
+    stop_bits: int = 1
+
+    def __post_init__(self) -> None:
+        if isinstance(self.baudrate, bool) or not isinstance(self.baudrate, int):
+            raise TypeError("baudrate must be an integer")
+        if self.baudrate <= 0:
+            raise ValueError("baudrate must be positive")
+        if isinstance(self.data_bits, bool) or not isinstance(self.data_bits, int):
+            raise TypeError("data_bits must be an integer")
+        if self.data_bits not in (5, 6, 7, 8):
+            raise ValueError("data_bits must be 5, 6, 7, or 8")
+        if not isinstance(self.parity, str) or self.parity.casefold() not in {
+            "none",
+            "even",
+            "odd",
+        }:
+            raise ValueError("parity must be none, even, or odd")
+        if isinstance(self.stop_bits, bool) or not isinstance(self.stop_bits, int):
+            raise TypeError("stop_bits must be an integer")
+        if self.stop_bits not in (1, 2):
+            raise ValueError("stop_bits must be 1 or 2")
+
+
+@dataclass(frozen=True, slots=True)
+class EbcModel:
+    """Model-specific protocol behavior held by the tester registry."""
+
+    model_id: int
+    name: str
+    serial: EbcSerialSettings
+    current_factor: float = 1.0
+    voltage_factor: float = 1.0
+    connect_packet: bytes = CONNECT
+    stop_packet: bytes = STOP
+    disconnect_packet: bytes = DISCONNECT
+    supports_control: bool = False
+    profile_builders: Mapping[EbcProfile, Callable[..., bytes]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.model_id, bool) or not isinstance(self.model_id, int):
+            raise TypeError("model_id must be an integer")
+        if not 0 <= self.model_id <= 0xFF:
+            raise ValueError("model_id must fit in one byte")
+        if not isinstance(self.name, str):
+            raise TypeError("model name must be a string")
+        if not self.name:
+            raise ValueError("model name must not be empty")
+        for label, factor in (
+            ("current_factor", self.current_factor),
+            ("voltage_factor", self.voltage_factor),
+        ):
+            try:
+                numeric_factor = float(factor)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{label} must be numeric") from exc
+            if not math.isfinite(numeric_factor) or numeric_factor <= 0:
+                raise ValueError(f"{label} must be finite and positive")
+            object.__setattr__(self, label, numeric_factor)
+        for label, packet in (
+            ("connect_packet", self.connect_packet),
+            ("stop_packet", self.stop_packet),
+            ("disconnect_packet", self.disconnect_packet),
+        ):
+            if not isinstance(packet, (bytes, bytearray)):
+                raise TypeError(f"{label} must be bytes")
+            packet = bytes(packet)
+            object.__setattr__(self, label, packet)
+            if len(packet) != COMMAND_LENGTH:
+                raise ValueError(f"{label} must be a {COMMAND_LENGTH}-byte command")
+            if packet[0] != FRAME_PREFIX or packet[-1] != FRAME_SUFFIX:
+                raise ValueError(f"{label} must start with FA and end with F8")
+            if packet[COMMAND_CHECKSUM_INDEX] != checksum(packet, COMMAND_CHECKSUM_INDEX):
+                raise ValueError(f"{label} has an invalid checksum")
+        if self.supports_control and not self.profile_builders:
+            raise ValueError("a controllable model must provide profile builders")
+
+    def build_profile(self, profile: EbcProfile | str, **kwargs: object) -> bytes:
+        """Build a packet using this model's registered profile behavior."""
+
+        try:
+            profile_kind = EbcProfile(profile)
+        except ValueError as exc:
+            raise ProtocolError(f"unsupported profile: {profile!r}") from exc
+        if not self.supports_control:
+            raise ProtocolError(f"model {self.name} does not support control profiles")
+        builder = self.profile_builders.get(profile_kind)
+        if builder is None:
+            raise ProtocolError(f"model {self.name} has no {profile_kind.value} packet builder")
+        return builder(**kwargs)
 
 
 def checksum(frame: bytes, checksum_index: int) -> int:
@@ -179,6 +285,45 @@ def make_constant_current_discharge_plan(
     return finalize_command(result)
 
 
+# The A10H is the only model currently validated for control. Additional
+# models can be registered with their own serial/scaling/packet behavior after
+# their wire protocol has been captured and reviewed.
+A10H_MODEL = EbcModel(
+    model_id=EBC_A10H_MODEL_ID,
+    name="EBC-A10H",
+    serial=EbcSerialSettings(baudrate=9600, data_bits=8, parity="even", stop_bits=1),
+    current_factor=1.0,
+    voltage_factor=1.0,
+    connect_packet=CONNECT,
+    stop_packet=STOP,
+    disconnect_packet=DISCONNECT,
+    supports_control=True,
+    profile_builders={
+        EbcProfile.LEAD_ACID_CHARGE: make_lead_acid_charge_plan,
+        EbcProfile.CCCV_CHARGE: make_cccv_charge_plan,
+        EbcProfile.CONSTANT_CURRENT_DISCHARGE: make_constant_current_discharge_plan,
+    },
+)
+
+MODEL_REGISTRY: dict[int, EbcModel] = {A10H_MODEL.model_id: A10H_MODEL}
+MODEL_NAMES: dict[int, str] = {model_id: model.name for model_id, model in MODEL_REGISTRY.items()}
+
+
+def get_model(model_id: int) -> EbcModel | None:
+    """Return the registered model for a wire-level model identifier."""
+
+    return MODEL_REGISTRY.get(model_id)
+
+
+def register_model(model: EbcModel, *, replace: bool = False) -> None:
+    """Add a validated model to the registry for status decoding/control."""
+
+    if model.model_id in MODEL_REGISTRY and not replace:
+        raise ProtocolError(f"model ID 0x{model.model_id:02X} is already registered")
+    MODEL_REGISTRY[model.model_id] = model
+    MODEL_NAMES[model.model_id] = model.name
+
+
 @dataclass(frozen=True)
 class EbcStatus:
     """One validated 19-byte status response from an EBC tester."""
@@ -203,7 +348,8 @@ class EbcStatus:
 
     @property
     def model_name(self) -> str:
-        return MODEL_NAMES.get(self.model_id, f"unknown (0x{self.model_id:02X})")
+        model = get_model(self.model_id)
+        return model.name if model is not None else f"unknown (0x{self.model_id:02X})"
 
     @property
     def completion_reason(self) -> EbcCompletionReason | None:
@@ -219,12 +365,13 @@ class EbcStatus:
 
 
 def parse_status(
-    frame: bytes, *, current_factor: float = 1.0, voltage_factor: float = 1.0
+    frame: bytes, *, current_factor: float | None = None, voltage_factor: float | None = None
 ) -> EbcStatus:
     """Validate and decode a status response.
 
-    EBC-A10H uses factors of one for both current and voltage. Other model
-    factors can be supplied explicitly once their model is known.
+    When scaling factors are omitted, the registered model's factors are used.
+    Unknown model IDs remain readable with the A10H-compatible default factors;
+    callers must still explicitly validate a model before sending controls.
     """
 
     if len(frame) != STATUS_LENGTH:
@@ -237,6 +384,11 @@ def parse_status(
     actual = frame[STATUS_CHECKSUM_INDEX]
     if actual != expected:
         raise ProtocolError(f"bad status checksum: expected 0x{expected:02X}, got 0x{actual:02X}")
+    model = get_model(frame[16])
+    if current_factor is None:
+        current_factor = model.current_factor if model is not None else 1.0
+    if voltage_factor is None:
+        voltage_factor = model.voltage_factor if model is not None else 1.0
     return EbcStatus(
         current_amps=decode_current(frame[2:4], current_factor),
         voltage_volts=decode_voltage(frame[4:6], voltage_factor),

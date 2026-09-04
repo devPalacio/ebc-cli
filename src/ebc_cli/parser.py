@@ -31,6 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
                 help="stop after this many samples (default: run until interrupted)",
             )
 
+    report = subcommands.add_parser(
+        "report",
+        help="summarize a recorded CSV session without connecting to the tester",
+    )
+    report.add_argument("path", type=Path, help="CSV session log to replay")
+
     plan = subcommands.add_parser(
         "plan-lead-acid-charge",
         help="print a PbAc packet only; this command never transmits it",
