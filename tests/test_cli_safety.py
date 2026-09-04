@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 from typing import Self
 from unittest.mock import patch
 
-from ebc_cli import cli, commands, session
+from ebc_cli import cli, commands, resources, session
 from ebc_cli.csvlog import StatusCsvLogger
 from ebc_cli.device import DeviceError
 from ebc_cli.protocol import FRAME_PREFIX, FRAME_SUFFIX, EbcStatus, checksum
@@ -198,7 +198,7 @@ class CliSafetyTests(unittest.TestCase):
         tester = FakeTester()
         with TemporaryDirectory() as temporary_directory:
             with (
-                patch.object(commands, "EbcDevice", return_value=tester),
+                patch.object(resources, "EbcDevice", return_value=tester),
                 patch.object(commands, "run_active_session", autospec=True) as run_session,
             ):
                 run_session.return_value = session.SessionResult(

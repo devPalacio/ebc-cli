@@ -1,12 +1,9 @@
 """Command handlers for the ebc CLI."""
 
 import argparse
-from contextlib import nullcontext
-from datetime import UTC, datetime
 from pathlib import Path
 
-from .csvlog import StatusCsvLogger
-from .device import DeviceError, EbcDevice
+from .device import DeviceError
 from .profiles import (
     TesterProfile,
     make_capacity_test_profile,
@@ -14,6 +11,7 @@ from .profiles import (
     make_recovery_profile,
 )
 from .protocol import EbcStatus, make_lead_acid_charge_plan
+from .resources import command_resources
 from .session import (
     SessionResult,
     SessionStopReason,
@@ -93,35 +91,41 @@ def _run_profile(
     report_log_before_sampling: bool = False,
     show_baseline: bool = True,
 ) -> int:
-    log_context, log_path = _command_log_context(args)
-    with (
-        EbcDevice(args.device, args.timeout) as tester,
-        log_context as logger,
-        SupervisedSession(tester, logger) as session,
-    ):
-        baseline = profile.start(tester)
-        if logger is not None:
-            logger.write(baseline, event=f"{profile.kind.value}-baseline")
-        session.mark_started(profile.start_event)
-        print(profile.summary, flush=profile.kind.value == "capacity-test")
-        if show_baseline:
-            print("Baseline: ", end="")
-            print_status(baseline)
-        if report_log_before_sampling:
-            _report_log(log_path)
-        result = run_active_session(
-            session=session,
-            tester=tester,
-            logger=logger,
-            printer=print_status,
-            timeout_minutes=profile.timeout_minutes,
-            sample_event=profile.sample_event,
-            stop_on_cutoff=profile.stop_on_cutoff,
-        )
-        _report_session_result(result)
+    with _open_resources(args) as resources:
+        baseline = profile.start(resources.tester)
+        if resources.logger is not None:
+            resources.logger.write(baseline, event=f"{profile.kind.value}-baseline")
+        with SupervisedSession(resources.tester, resources.logger) as session:
+            session.mark_started(profile.start_event)
+            print(profile.summary, flush=profile.kind.value == "capacity-test")
+            if show_baseline:
+                print("Baseline: ", end="")
+                print_status(baseline)
+            if report_log_before_sampling:
+                _report_log(resources.log_path)
+            result = run_active_session(
+                session=session,
+                tester=resources.tester,
+                logger=resources.logger,
+                printer=print_status,
+                timeout_minutes=profile.timeout_minutes,
+                sample_event=profile.sample_event,
+                stop_on_cutoff=profile.stop_on_cutoff,
+            )
+            _report_session_result(result)
     if not report_log_before_sampling:
-        _report_log(log_path)
+        _report_log(resources.log_path)
     return 0
+
+
+def _open_resources(args: argparse.Namespace):
+    return command_resources(
+        device=args.device,
+        timeout=args.timeout,
+        command=args.command,
+        log_dir=args.log_dir,
+        no_log=args.no_log,
+    )
 
 
 def _require_supervised_execution(args: argparse.Namespace, operation: str) -> None:
@@ -140,24 +144,22 @@ def _report_session_result(result: SessionResult) -> None:
 def handle_stop(args: argparse.Namespace) -> int:
     if not args.execute:
         raise DeviceError("stop requires --execute")
-    log_context, log_path = _command_log_context(args)
-    with EbcDevice(args.device, args.timeout) as tester, log_context as logger:
-        tester.stop()
-        if logger is not None:
-            logger.write_event("stop-sent")
+    with _open_resources(args) as resources:
+        resources.tester.stop()
+        if resources.logger is not None:
+            resources.logger.write_event("stop-sent")
     print("Stop frame sent.")
-    _report_log(log_path)
+    _report_log(resources.log_path)
     return 0
 
 
 def handle_status(args: argparse.Namespace) -> int:
-    log_context, log_path = _command_log_context(args)
-    with EbcDevice(args.device, args.timeout) as tester, log_context as logger:
-        status = tester.status()
+    with _open_resources(args) as resources:
+        status = resources.tester.status()
         print_status(status)
-        if logger is not None:
-            logger.write(status)
-    _report_log(log_path)
+        if resources.logger is not None:
+            resources.logger.write(status)
+    _report_log(resources.log_path)
     return 0
 
 
@@ -166,26 +168,17 @@ def handle_monitor(args: argparse.Namespace) -> int:
         raise DeviceError("interval must be greater than zero")
     if args.count is not None and args.count <= 0:
         raise DeviceError("count must be greater than zero")
-    log_context, log_path = _command_log_context(args)
-    with EbcDevice(args.device, args.timeout) as tester, log_context as logger:
+    with _open_resources(args) as resources:
         result = run_monitor_session(
-            tester=tester,
-            logger=logger,
+            tester=resources.tester,
+            logger=resources.logger,
             printer=print_status,
             interval=args.interval,
             count=args.count,
         )
     print(f"Logged {result.samples} sample(s)")
-    _report_log(log_path)
+    _report_log(resources.log_path)
     return 0
-
-
-def _command_log_context(args: argparse.Namespace):
-    if args.no_log:
-        return nullcontext(None), None
-    filename = f"{datetime.now(tz=UTC).astimezone().strftime('%Y%m%d-%H%M%S')}_{args.command}.csv"
-    path = args.log_dir.expanduser() / filename
-    return StatusCsvLogger(path), path
 
 
 def _report_log(path: Path | None) -> None:
