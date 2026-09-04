@@ -60,6 +60,20 @@ class ProtocolSafetyTests(unittest.TestCase):
         self.assertEqual(status.model_id, 0x99)
         self.assertEqual(status.model_name, "unknown (0x99)")
 
+    def test_device_lock_reports_busy_port(self) -> None:
+        device = EbcDevice("/dev/test", timeout=0.1)
+        with (
+            patch("ebc_cli.device.fcntl.flock", side_effect=BlockingIOError),
+            self.assertRaisesRegex(DeviceError, "already in use"),
+        ):
+            device._acquire_lock(42)
+
+    def test_device_lock_can_be_disabled(self) -> None:
+        device = EbcDevice("/dev/test", timeout=0.1, lock_device=False)
+        with patch("ebc_cli.device.fcntl.flock") as flock:
+            device._acquire_lock(42)
+        flock.assert_not_called()
+
     def test_begin_rejects_unknown_model_before_stop_or_profile(self) -> None:
         device = EbcDevice(timeout=0.1)
         device._fd = 1

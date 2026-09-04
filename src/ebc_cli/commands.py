@@ -118,13 +118,14 @@ def _run_profile(
     return 0
 
 
-def _open_resources(args: argparse.Namespace):
+def _open_resources(args: argparse.Namespace, *, lock_device: bool = True):
     return command_resources(
         device=args.device,
         timeout=args.timeout,
         command=args.command,
         log_dir=args.log_dir,
         no_log=args.no_log,
+        lock_device=lock_device,
     )
 
 
@@ -144,7 +145,7 @@ def _report_session_result(result: SessionResult) -> None:
 def handle_stop(args: argparse.Namespace) -> int:
     if not args.execute:
         raise DeviceError("stop requires --execute")
-    with _open_resources(args) as resources:
+    with _open_resources(args, lock_device=False) as resources:
         resources.tester.stop()
         if resources.logger is not None:
             resources.logger.write_event("stop-sent")

@@ -18,6 +18,7 @@ Completed in the current `0.1.x` baseline:
 - Typed, validated charge and discharge profile objects shared by the CLI
   handlers.
 - Semantic completion reasons for the known A10H capacity cutoff status.
+- Advisory CLI serial-device ownership with an emergency-stop bypass.
 - Hardware-free protocol and lifecycle tests, plus UV packaging checks.
 
 ## Near term: make the control path boring
@@ -26,8 +27,8 @@ Completed in the current `0.1.x` baseline:
   reasons.
 - [x] Introduce typed charge/discharge profile objects so validation and packet
   construction live together instead of in individual CLI branches.
-- [ ] Enforce one process owning a serial device at a time, while preserving an
-  emergency stop path.
+- [x] Enforce one CLI process owning a serial device at a time, while
+  preserving an emergency stop path.
 - [ ] Add pseudo-terminal integration tests for serial framing, partial reads,
   timeouts, disconnects, and stop-on-cleanup behavior.
 - [ ] Capture and replay real A10H sessions in tests, including both parity and

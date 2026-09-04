@@ -27,11 +27,17 @@ def command_resources(
     command: str,
     log_dir: str | Path,
     no_log: bool,
+    lock_device: bool = True,
 ) -> Iterator[CommandResources]:
-    """Open the tester and optional flushed CSV logger as one owned scope."""
+    """Open the tester and optional flushed CSV logger as one owned scope.
+
+    Normal commands take an advisory lock through :class:`EbcDevice`. The
+    explicit ``lock_device=False`` path is reserved for the emergency STOP
+    command, which must remain usable when another CLI process owns the port.
+    """
 
     log_path = None if no_log else _log_path(command, log_dir)
-    with EbcDevice(device, timeout) as tester:
+    with EbcDevice(device, timeout, lock_device=lock_device) as tester:
         if log_path is None:
             yield CommandResources(tester=tester, logger=None, log_path=None)
             return

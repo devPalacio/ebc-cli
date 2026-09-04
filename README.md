@@ -32,7 +32,10 @@ The existing GUI must be closed before using a serial command: two programs
 must not read from the tester's one serial port at the same time. Commands that
 start a charge, recovery, or capacity test require both `--execute` and
 `--i-am-present` as an explicit confirmation; `stop` requires `--execute`.
-The plan command is read-only and never transmits.
+Normal CLI commands take an advisory lock so two CLI processes cannot operate
+the same serial device concurrently. `stop --execute` deliberately bypasses
+that lock so it remains an emergency path. The plan command is read-only and
+never transmits.
 
 ## Installation
 

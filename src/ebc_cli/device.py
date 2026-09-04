@@ -1,5 +1,6 @@
 """Minimal POSIX serial adapter for cautious EBC operations."""
 
+import fcntl
 import os
 import select
 import termios
@@ -30,11 +31,18 @@ class DeviceError(RuntimeError):
 class EbcDevice:
     """A 9600 8E1 EBC connection."""
 
-    def __init__(self, path: str | Path = "/dev/ttyUSB0", timeout: float = 1.0):
+    def __init__(
+        self,
+        path: str | Path = "/dev/ttyUSB0",
+        timeout: float = 1.0,
+        *,
+        lock_device: bool = True,
+    ):
         if timeout <= 0:
             raise DeviceError("timeout must be greater than zero")
         self.path = Path(path)
         self.timeout = timeout
+        self.lock_device = lock_device
         self._fd: int | None = None
         self._rx_buffer = bytearray()
         self._control_active = False
@@ -61,6 +69,12 @@ class EbcDevice:
             ) from exc
         except OSError as exc:
             raise DeviceError(f"cannot open {self.path}: {exc.strerror}") from exc
+
+        try:
+            self._acquire_lock(fd)
+        except DeviceError:
+            os.close(fd)
+            raise
 
         try:
             attrs = termios.tcgetattr(fd)
@@ -230,6 +244,18 @@ class EbcDevice:
         _, writable, _ = select.select([], [self._fd], [], self.timeout)
         if not writable:
             raise DeviceError("serial device did not become writable")
+
+    def _acquire_lock(self, fd: int) -> None:
+        """Acquire this process's advisory lock on the open serial device."""
+
+        if not self.lock_device:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise DeviceError(f"serial device is already in use: {self.path}") from exc
+        except OSError as exc:
+            raise DeviceError(f"cannot lock {self.path}: {exc}") from exc
 
     def _require_open(self) -> None:
         if self._fd is None:
