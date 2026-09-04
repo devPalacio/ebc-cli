@@ -17,11 +17,12 @@ Completed in the current `0.1.x` baseline:
   serial failure paths.
 - Typed, validated charge and discharge profile objects shared by the CLI
   handlers.
+- Semantic completion reasons for the known A10H capacity cutoff status.
 - Hardware-free protocol and lifecycle tests, plus UV packaging checks.
 
 ## Near term: make the control path boring
 
-- [ ] Replace raw status-byte checks with semantic tester states and completion
+- [x] Replace raw status-byte checks with semantic tester states and completion
   reasons.
 - [x] Introduce typed charge/discharge profile objects so validation and packet
   construction live together instead of in individual CLI branches.

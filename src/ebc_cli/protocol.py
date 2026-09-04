@@ -7,6 +7,7 @@ prefix, excluding the checksum byte itself.
 
 import math
 from dataclasses import dataclass
+from enum import StrEnum
 from functools import reduce
 from operator import xor
 
@@ -26,6 +27,15 @@ CC_DISCHARGE_START = bytes.fromhex("FA0100000000000000F8")
 
 EBC_A10H_MODEL_ID = 0x06
 MODEL_NAMES = {EBC_A10H_MODEL_ID: "EBC-A10H"}
+
+
+class EbcCompletionReason(StrEnum):
+    """Completion reasons confirmed from the A10H status stream."""
+
+    CAPACITY_CUTOFF = "capacity-cutoff"
+
+
+_COMPLETION_REASONS = {0x14: EbcCompletionReason.CAPACITY_CUTOFF}
 
 
 class ProtocolError(ValueError):
@@ -194,6 +204,14 @@ class EbcStatus:
     @property
     def model_name(self) -> str:
         return MODEL_NAMES.get(self.model_id, f"unknown (0x{self.model_id:02X})")
+
+    @property
+    def completion_reason(self) -> EbcCompletionReason | None:
+        """Return a known completion reason encoded by the status state byte."""
+
+        if len(self.raw) <= 1:
+            return None
+        return _COMPLETION_REASONS.get(self.raw[1])
 
     @property
     def power_watts(self) -> float:

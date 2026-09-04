@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Protocol, Self
 
 from .device import DeviceError
-from .protocol import EbcStatus
+from .protocol import EbcCompletionReason, EbcStatus
 
 
 class Tester(Protocol):
@@ -204,10 +204,9 @@ def run_active_session(
             )
         samples += 1
 
-        # The bundled controller maps a CC discharge auto-off to 0x14. This
-        # signal is meaningful for capacity tests; charge modes remain bounded
-        # by their configured timeout because completion codes vary.
-        if stop_on_cutoff and status.raw[1] == 0x14:
+        # This signal is meaningful for capacity tests; charge modes remain
+        # bounded by their configured timeout because completion codes vary.
+        if stop_on_cutoff and status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF:
             return _finish_session(
                 session=session,
                 stop_event="device-cutoff-stop-sent",

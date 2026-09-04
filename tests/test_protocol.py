@@ -12,6 +12,7 @@ from ebc_cli.protocol import (
     FRAME_PREFIX,
     FRAME_SUFFIX,
     STATUS_CHECKSUM_INDEX,
+    EbcCompletionReason,
     ProtocolError,
     checksum,
     decode_capacity,
@@ -93,6 +94,11 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(status.voltage_volts, 12.0)
         self.assertEqual(status.capacity_ah, 0.1)
         self.assertEqual(status.device_timer_minutes, 720)
+        self.assertIsNone(status.completion_reason)
+
+    def test_status_exposes_capacity_cutoff_reason(self) -> None:
+        status = parse_status(_status_frame(state=0x14))
+        self.assertIs(status.completion_reason, EbcCompletionReason.CAPACITY_CUTOFF)
 
     def test_status_parser_rejects_bad_checksum(self) -> None:
         frame = bytearray(19)
@@ -148,10 +154,10 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(main(["capacity-test"]), 2)
 
 
-def _status_frame() -> bytes:
+def _status_frame(*, state: int = 0x68) -> bytes:
     frame = bytearray(19)
     frame[0] = FRAME_PREFIX
-    frame[1] = 0x68
+    frame[1] = state
     frame[2:4] = bytes((0, 70))  # 0.700 A
     frame[4:6] = bytes((50, 0))  # 12.000 V
     frame[6:8] = bytes((0, 100))  # 0.100 Ah
