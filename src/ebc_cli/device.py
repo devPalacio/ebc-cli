@@ -1,12 +1,11 @@
 """Minimal POSIX serial adapter for cautious EBC operations."""
 
-from __future__ import annotations
-
 import os
 import select
 import termios
 import time
 from pathlib import Path
+from typing import Self
 
 from .protocol import (
     CONNECT,
@@ -14,13 +13,12 @@ from .protocol import (
     MODEL_NAMES,
     STOP,
     EbcStatus,
+    find_valid_status_frame,
     make_cccv_charge_plan,
     make_constant_current_discharge_plan,
-    find_valid_status_frame,
     make_lead_acid_charge_plan,
     parse_status,
 )
-
 
 SUPPORTED_MODEL_ID = EBC_A10H_MODEL_ID
 
@@ -41,7 +39,7 @@ class EbcDevice:
         self._rx_buffer = bytearray()
         self._control_active = False
 
-    def __enter__(self) -> "EbcDevice":
+    def __enter__(self) -> Self:
         self.open()
         return self
 
@@ -102,7 +100,7 @@ class EbcDevice:
         if self._control_active:
             try:
                 self._write_all(STOP)
-            except (DeviceError, OSError):
+            except DeviceError, OSError:
                 pass
         try:
             os.close(fd)

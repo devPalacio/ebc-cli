@@ -1,10 +1,8 @@
-from __future__ import annotations
-
 import math
 import unittest
 from unittest.mock import Mock, call, patch
 
-from ebc_cli.device import EbcDevice, DeviceError
+from ebc_cli.device import DeviceError, EbcDevice
 from ebc_cli.protocol import (
     CONNECT,
     FRAME_PREFIX,
@@ -46,9 +44,11 @@ class ProtocolSafetyTests(unittest.TestCase):
     def test_decoding_rejects_non_finite_or_non_positive_factors(self) -> None:
         for decoder in (decode_current, decode_voltage):
             for factor in (0, -1, math.nan, math.inf, "not-a-factor"):
-                with self.subTest(decoder=decoder.__name__, factor=factor):
-                    with self.assertRaises(ProtocolError):
-                        decoder(bytes((0, 70)), factor)
+                with (
+                    self.subTest(decoder=decoder.__name__, factor=factor),
+                    self.assertRaises(ProtocolError),
+                ):
+                    decoder(bytes((0, 70)), factor)
 
     def test_timer_requires_integer_minutes(self) -> None:
         for minutes in (1.5, math.nan, "60", True):
@@ -67,9 +67,7 @@ class ProtocolSafetyTests(unittest.TestCase):
         device._read_status_frame = Mock(return_value=status_frame(model_id=0x99))
 
         with self.assertRaisesRegex(DeviceError, "only controls EBC-A10H"):
-            device.begin_float_charge(
-                current_amps=0.5, voltage_volts=13.7, timeout_minutes=120
-            )
+            device.begin_float_charge(current_amps=0.5, voltage_volts=13.7, timeout_minutes=120)
 
         device._write_all.assert_called_once_with(CONNECT)
         self.assertFalse(device._control_active)
@@ -89,9 +87,7 @@ class ProtocolSafetyTests(unittest.TestCase):
         device = EbcDevice(timeout=0.1)
         device._fd = 1
         device._write_all = Mock()
-        device._read_status_frame = Mock(
-            side_effect=[status_frame(), status_frame()]
-        )
+        device._read_status_frame = Mock(side_effect=[status_frame(), status_frame()])
 
         baseline = device.begin_float_charge(
             current_amps=0.5, voltage_volts=13.7, timeout_minutes=120
@@ -105,7 +101,9 @@ class ProtocolSafetyTests(unittest.TestCase):
                 call(CONNECT),
                 call(STOP),
                 call(CONNECT),
-                call(make_cccv_charge_plan(current_amps=0.5, voltage_volts=13.7, timeout_minutes=120)),
+                call(
+                    make_cccv_charge_plan(current_amps=0.5, voltage_volts=13.7, timeout_minutes=120)
+                ),
             ],
         )
 

@@ -3,7 +3,7 @@ name = "ebc-cli"
 version = "0.1.0"
 description = "A cautious terminal interface for ZKETECH EBC battery testers"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 license = { file = "LICENSE" }
 authors = [{ name = "Jay" }]
 keywords = ["battery", "electronics", "serial", "ZKETECH", "EBC-A10H"]
@@ -14,7 +14,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.14",
     "Topic :: System :: Hardware",
 ]
 
@@ -27,3 +27,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ebc_cli"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.6",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100

@@ -5,13 +5,10 @@ nineteen-byte status frame. Checksums are XORs over the bytes after the frame
 prefix, excluding the checksum byte itself.
 """
 
-from __future__ import annotations
-
 import math
 from dataclasses import dataclass
 from functools import reduce
 from operator import xor
-
 
 COMMAND_LENGTH = 10
 STATUS_LENGTH = 19
@@ -203,7 +200,9 @@ class EbcStatus:
         return self.voltage_volts * self.current_amps
 
 
-def parse_status(frame: bytes, *, current_factor: float = 1.0, voltage_factor: float = 1.0) -> EbcStatus:
+def parse_status(
+    frame: bytes, *, current_factor: float = 1.0, voltage_factor: float = 1.0
+) -> EbcStatus:
     """Validate and decode a status response.
 
     EBC-A10H uses factors of one for both current and voltage. Other model

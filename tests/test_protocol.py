@@ -1,13 +1,12 @@
-from __future__ import annotations
-
-import unittest
 import csv
-from datetime import datetime, timezone
+import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ebc_cli.cli import main
 from ebc_cli.csvlog import CSV_HEADER, StatusCsvLogger
+from ebc_cli.device import DeviceError, EbcDevice
 from ebc_cli.protocol import (
     CONNECT,
     FRAME_PREFIX,
@@ -22,12 +21,11 @@ from ebc_cli.protocol import (
     encode_scaled,
     encode_timer,
     find_valid_status_frame,
-    make_lead_acid_charge_plan,
     make_cccv_charge_plan,
     make_constant_current_discharge_plan,
+    make_lead_acid_charge_plan,
     parse_status,
 )
-from ebc_cli.device import DeviceError, EbcDevice
 
 
 class ProtocolTests(unittest.TestCase):
@@ -36,7 +34,7 @@ class ProtocolTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "logs" / "capacity.csv"
             with StatusCsvLogger(path) as logger:
-                logger.write(status, timestamp=datetime(2026, 9, 3, 20, 0, tzinfo=timezone.utc))
+                logger.write(status, timestamp=datetime(2026, 9, 3, 20, 0, tzinfo=UTC))
             with path.open(newline="", encoding="utf-8") as csv_file:
                 rows = list(csv.reader(csv_file))
         self.assertEqual(tuple(rows[0]), CSV_HEADER)
@@ -48,7 +46,7 @@ class ProtocolTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "event.csv"
             with StatusCsvLogger(path) as logger:
-                logger.write_event("stop-sent", timestamp=datetime(2026, 9, 3, 20, 0, tzinfo=timezone.utc))
+                logger.write_event("stop-sent", timestamp=datetime(2026, 9, 3, 20, 0, tzinfo=UTC))
             with path.open(newline="", encoding="utf-8") as csv_file:
                 rows = list(csv.reader(csv_file))
         self.assertEqual(rows[1][1], "stop-sent")
@@ -109,7 +107,7 @@ class ProtocolTests(unittest.TestCase):
         status[16] = 0x06
         status[STATUS_CHECKSUM_INDEX] = checksum(status, STATUS_CHECKSUM_INDEX)
         status[-1] = FRAME_SUFFIX
-        self.assertEqual(find_valid_status_frame(b"\xFA\x01\x02" + bytes(status)), bytes(status))
+        self.assertEqual(find_valid_status_frame(b"\xfa\x01\x02" + bytes(status)), bytes(status))
 
     def test_device_rejects_non_positive_timeout_before_opening_port(self) -> None:
         with self.assertRaises(DeviceError):

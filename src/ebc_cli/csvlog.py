@@ -1,14 +1,11 @@
 """Durable CSV recording of decoded EBC status samples."""
 
-from __future__ import annotations
-
 import csv
 from datetime import datetime
 from pathlib import Path
-from typing import TextIO
+from typing import Self, TextIO
 
 from .protocol import EbcStatus
-
 
 CSV_HEADER = (
     "timestamp",
@@ -37,7 +34,7 @@ class StatusCsvLogger:
         self._file: TextIO | None = None
         self._writer: csv.writer | None = None
 
-    def __enter__(self) -> "StatusCsvLogger":
+    def __enter__(self) -> Self:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         needs_header = not self.path.exists() or self.path.stat().st_size == 0
         self._file = self.path.open("a", encoding="utf-8", newline="")
@@ -91,5 +88,7 @@ class StatusCsvLogger:
         if self._file is None or self._writer is None:
             raise RuntimeError("CSV logger is not open")
         observed_at = timestamp or datetime.now().astimezone()
-        self._writer.writerow((observed_at.isoformat(timespec="seconds"), event, *("" for _ in CSV_HEADER[2:])))
+        self._writer.writerow(
+            (observed_at.isoformat(timespec="seconds"), event, *("" for _ in CSV_HEADER[2:]))
+        )
         self._file.flush()

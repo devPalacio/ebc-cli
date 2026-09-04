@@ -1,15 +1,14 @@
-from __future__ import annotations
-
 import csv
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Self
 from unittest.mock import patch
 
-from ebc_cli import cli
+from ebc_cli import cli, commands, session
 from ebc_cli.csvlog import StatusCsvLogger
 from ebc_cli.device import DeviceError
-from ebc_cli.protocol import EbcStatus, FRAME_PREFIX, FRAME_SUFFIX, checksum
+from ebc_cli.protocol import FRAME_PREFIX, FRAME_SUFFIX, EbcStatus, checksum
 
 
 class FakeTester:
@@ -17,7 +16,7 @@ class FakeTester:
         self.statuses = list(statuses or [])
         self.stop_calls = 0
 
-    def __enter__(self) -> "FakeTester":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
@@ -64,48 +63,56 @@ class CliSafetyTests(unittest.TestCase):
         clock = FakeClock()
         with TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "session.csv"
-            with StatusCsvLogger(path) as logger:
-                with cli._SupervisedSession(tester, logger) as session:
-                    session.mark_started("test-started")
-                    with patch.object(cli, "_print_status"):
-                        cli._run_active_session(
-                            session=session,
-                            tester=tester,
-                            logger=logger,
-                            timeout_minutes=1,
-                            sample_event="test-sample",
-                            poll_interval=60,
-                            clock=clock,
-                            sleeper=clock.sleep,
-                        )
+            with (
+                StatusCsvLogger(path) as logger,
+                session.SupervisedSession(tester, logger) as supervised,
+            ):
+                supervised.mark_started("test-started")
+                session.run_active_session(
+                    session=supervised,
+                    tester=tester,
+                    logger=logger,
+                    printer=lambda _status: None,
+                    timeout_minutes=1,
+                    sample_event="test-sample",
+                    poll_interval=60,
+                    clock=clock,
+                    sleeper=clock.sleep,
+                )
             with path.open(newline="", encoding="utf-8") as csv_file:
                 rows = list(csv.reader(csv_file))
 
         self.assertEqual(tester.stop_calls, 1)
-        self.assertEqual([row[1] for row in rows[1:]], [
-            "test-started",
-            "test-sample",
-            "timeout-stop-sent",
-        ])
+        self.assertEqual(
+            [row[1] for row in rows[1:]],
+            [
+                "test-started",
+                "test-sample",
+                "timeout-stop-sent",
+            ],
+        )
         self.assertEqual(rows[2][2], "0.000")
 
     def test_active_session_stops_after_serial_error(self) -> None:
         tester = FakeTester([DeviceError("serial read failed")])
         with TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "session.csv"
-            with StatusCsvLogger(path) as logger:
-                with self.assertRaises(DeviceError):
-                    with cli._SupervisedSession(tester, logger) as session:
-                        session.mark_started("test-started")
-                        cli._run_active_session(
-                            session=session,
-                            tester=tester,
-                            logger=logger,
-                            timeout_minutes=1,
-                            sample_event="test-sample",
-                            clock=lambda: 0.0,
-                            sleeper=lambda _seconds: None,
-                        )
+            with (
+                StatusCsvLogger(path) as logger,
+                self.assertRaises(DeviceError),
+                session.SupervisedSession(tester, logger) as supervised,
+            ):
+                supervised.mark_started("test-started")
+                session.run_active_session(
+                    session=supervised,
+                    tester=tester,
+                    logger=logger,
+                    printer=lambda _status: None,
+                    timeout_minutes=1,
+                    sample_event="test-sample",
+                    clock=lambda: 0.0,
+                    sleeper=lambda _seconds: None,
+                )
             with path.open(newline="", encoding="utf-8") as csv_file:
                 rows = list(csv.reader(csv_file))
 
@@ -113,43 +120,50 @@ class CliSafetyTests(unittest.TestCase):
         self.assertEqual(rows[-1][1], "error-stop-sent")
 
     def test_active_session_stops_after_termination_signal(self) -> None:
-        tester = FakeTester([cli._SessionSignal(15)])
-        with self.assertRaises(cli._SessionSignal):
-            with cli._SupervisedSession(tester, None) as session:
-                session.mark_started("test-started")
-                cli._run_active_session(
-                    session=session,
-                    tester=tester,
-                    logger=None,
-                    timeout_minutes=1,
-                    sample_event="test-sample",
-                    clock=lambda: 0.0,
-                    sleeper=lambda _seconds: None,
-                )
+        tester = FakeTester([session._SessionSignal(15)])
+        with (
+            self.assertRaises(session._SessionSignal),
+            session.SupervisedSession(tester, None) as supervised,
+        ):
+            supervised.mark_started("test-started")
+            session.run_active_session(
+                session=supervised,
+                tester=tester,
+                logger=None,
+                printer=lambda _status: None,
+                timeout_minutes=1,
+                sample_event="test-sample",
+                clock=lambda: 0.0,
+                sleeper=lambda _seconds: None,
+            )
         self.assertEqual(tester.stop_calls, 1)
 
     def test_active_session_stops_after_keyboard_interrupt(self) -> None:
         tester = FakeTester([KeyboardInterrupt()])
-        with self.assertRaises(KeyboardInterrupt):
-            with cli._SupervisedSession(tester, None) as session:
-                session.mark_started("test-started")
-                cli._run_active_session(
-                    session=session,
-                    tester=tester,
-                    logger=None,
-                    timeout_minutes=1,
-                    sample_event="test-sample",
-                    clock=lambda: 0.0,
-                    sleeper=lambda _seconds: None,
-                )
+        with (
+            self.assertRaises(KeyboardInterrupt),
+            session.SupervisedSession(tester, None) as supervised,
+        ):
+            supervised.mark_started("test-started")
+            session.run_active_session(
+                session=supervised,
+                tester=tester,
+                logger=None,
+                printer=lambda _status: None,
+                timeout_minutes=1,
+                sample_event="test-sample",
+                clock=lambda: 0.0,
+                sleeper=lambda _seconds: None,
+            )
         self.assertEqual(tester.stop_calls, 1)
 
     def test_recovery_main_uses_a_supervised_logged_session(self) -> None:
         tester = FakeTester()
         with TemporaryDirectory() as temporary_directory:
-            with patch.object(cli, "EbcDevice", return_value=tester), patch.object(
-                cli, "_run_active_session", autospec=True
-            ) as run_session:
+            with (
+                patch.object(commands, "EbcDevice", return_value=tester),
+                patch.object(commands, "run_active_session", autospec=True) as run_session,
+            ):
                 result = cli.main(
                     [
                         "recover-lead-acid",

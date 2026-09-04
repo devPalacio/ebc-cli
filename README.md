@@ -38,7 +38,7 @@ The plan command is read-only and never transmits.
 
 ### From a checkout
 
-Install [UV](https://docs.astral.sh/uv/) and Python 3.11 or newer, then run:
+Install [UV](https://docs.astral.sh/uv/) and Python 3.14 or newer, then run:
 
 ```bash
 git clone https://github.com/OWNER/REPOSITORY.git
@@ -124,6 +124,13 @@ Run the test suite from a checkout with:
 
 ```bash
 uv run python -m unittest discover -s tests -v
+```
+
+Run linting and formatting checks with:
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
 ```
 
 ## Protocol notes
