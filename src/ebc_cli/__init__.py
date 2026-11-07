@@ -15,6 +15,7 @@ start frame but does not guarantee a STOP frame when your code raises.
 """
 
 from .capabilities import A10H_CAPABILITIES, CapabilityError, EbcCapabilities
+from .capacity import CapacityAssessment, CapacityOutcome, CapacityRequest
 from .csvlog import StatusCsvLogger
 from .device import DeviceError, EbcDevice
 from .measurement import MeasurementAccumulator, MeasurementSummary
@@ -72,6 +73,9 @@ __all__ = [
     "BulkToFloatProfile",
     "BulkToFloatRun",
     "CapabilityError",
+    "CapacityAssessment",
+    "CapacityOutcome",
+    "CapacityRequest",
     "DeviceError",
     "EbcCapabilities",
     "EbcDevice",

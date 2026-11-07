@@ -42,9 +42,41 @@ other settings within the tester envelope. Capacity settings whose current
 multiplied by cutoff exceeds the load power ceiling are rejected before I/O.
 CC discharge also checks current times observed baseline voltage before START.
 These guards do not continuously regulate power or replace hardware protection.
-A timeout is an incomplete test,
-not proof that the cell delivered its full capacity. Charge throughput is not
-discharge capacity. Charge and discharge remain separate operations and logs.
+Charge throughput is not discharge capacity. Charge and discharge remain
+separate operations and logs.
+
+Capacity results distinguish measurement validity from the battery's capacity:
+
+- **Completed:** fresh post-start discharge activity was observed, followed by
+  the device cutoff, without a detected measurement-quality problem.
+- **Incomplete:** the endpoint was not established, the operation was interrupted,
+  or no discharge activity was observed. A cutoff-only sample is not a completed test.
+- **Invalid:** observation coverage or measured load current compromised the test.
+
+Partial Ah and Wh remain available, but do not represent a verified full-capacity
+measurement. No rated-capacity percentage or battery pass/fail decision is made.
+Capacity sampling requires streamed observations. A failed streamed read attempts
+STOP rather than accepting a potentially cached CONNECT reply as fresh evidence.
+The current-quality tolerance is `max(0.02 A, 5% of requested current)`, inclusive.
+This is an engineering screen, not a claim of calibrated accuracy. A zero-current
+terminal cutoff is not a load-current mismatch. Initial or trailing unobserved
+time over 30 seconds, skipped integration gaps, and non-increasing observation
+timestamps invalidate an otherwise observed discharge measurement. Shorter
+unobserved start and tail periods are disclosed, not extrapolated.
+
+`ebc report PATH` recomputes the same assessment from saved request metadata,
+ordered observations, and termination evidence. Older or ambiguous logs are
+labelled **unverified**, never assumed completed. Interrupted runs retain partial
+samples when logging works. `--no-log` disables durable replay, but the CLI still
+prints the in-memory partial assessment on ordinary read errors or interruption.
+Contradictory cutoff readings invalidate the measurement: terminal current may
+fall toward zero, but cannot exceed the requested load plus its current tolerance.
+The endpoint-voltage screen allows rebound of `max(0.10 V, 5% of cutoff)` above
+the requested cutoff. Larger discrepancies are flagged, not treated as evidence
+that the requested endpoint was reached. This allowance is an engineering
+consistency check, not a battery limit or a measured firmware characteristic.
+A capacity cutoff received before its deadline remains eligible for completion
+even if output runs past the deadline; receipt at or after the deadline does not.
 
 `charge` sends the existing CCCV start packet. Its end-current threshold is
 host policy, not a transmitted firmware setting. The pre-start baseline does

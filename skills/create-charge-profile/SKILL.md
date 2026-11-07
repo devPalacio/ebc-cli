@@ -72,7 +72,11 @@ Device auto-off is a distinct outcome, not proof that the host threshold was
 met. Cite manufacturer termination requirements and choose the observation
 policy explicitly when the defaults do not fit. A timeout is not completion.
 Use streamed post-start observations, not cached CONNECT replies, as charge
-completion evidence. Measure dwell and sample gaps at receipt, before output
+completion evidence. Capacity testing likewise requires fresh observed discharge
+before cutoff can establish a completed test. Keep completion, measurement
+validity, and battery acceptance separate. Preserve partial Ah and Wh on
+incomplete or invalid tests and expose the reasons in live and replay reports.
+Measure dwell and sample gaps at receipt, before output
 or logging can delay processing. Recheck the deadline before honoring completion.
 Check discharge power as well as current and voltage; independently valid
 settings can exceed the load power ceiling when multiplied together.

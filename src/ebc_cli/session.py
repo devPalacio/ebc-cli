@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, Self
 
+from .capacity import CapacityAssessment, CapacityPolicy
 from .device import DeviceError
 from .measurement import MeasurementAccumulator, MeasurementSummary
 from .modes import EbcModeCommand
@@ -67,6 +68,7 @@ class SessionResult:
     elapsed_seconds: float
     final_status: EbcStatus | None = None
     measurement: MeasurementSummary | None = None
+    capacity: CapacityAssessment | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +134,12 @@ class SupervisedSession:
                     event = "operator-interrupt-stop-sent"
                 else:
                     event = "error-stop-sent"
-                self.stop(event)
+                try:
+                    self.stop(event)
+                except Exception as stop_error:
+                    if not isinstance(_exc, BaseException):
+                        raise
+                    _exc.add_note(f"STOP cleanup failed: {stop_error}")
         finally:
             for signum, handler in self._old_handlers.items():
                 try:
@@ -155,9 +162,12 @@ class SupervisedSession:
         self._stopping = True
         try:
             self.tester.stop()
-        except Exception:
+        except Exception as stop_error:
             if self.logger is not None:
-                self.logger.write_event(f"{event}-failed")
+                try:
+                    self.logger.write_event(f"{event}-failed")
+                except Exception as log_error:  # noqa: BLE001 - preserve the STOP transport error
+                    stop_error.add_note(f"Could not log STOP failure: {log_error}")
             if raise_errors:
                 raise
             return False
@@ -219,92 +229,124 @@ def run_active_session(
     completion: Callable[[EbcStatus, int], SessionStopReason | None] | None = None,
     require_streamed: bool = False,
     on_sample: Callable[[EbcStatus, int], None] | None = None,
+    capacity_policy: CapacityPolicy | None = None,
+    started_at: float | None = None,
     poll_interval: float = 1.0,
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> SessionResult:
-    """Log live status until cutoff or timeout, stopping the tester on exit."""
+    """Log live status until cutoff or timeout, stopping the tester on exit.
+
+    Capacity failures retain their original exception and traceback, with a
+    ``capacity_assessment: CapacityAssessment`` attribute, even without logging.
+    """
 
     tester = session.tester
     logger = session.logger
-    session_started = clock()
+    session_started = clock() if started_at is None else started_at
     deadline = session_started + timeout_minutes * 60
     samples = 0
     final_status: EbcStatus | None = None
-    accounting = MeasurementAccumulator()
-    while True:
-        if clock() >= deadline:
-            return _finish_session(
-                session=session,
-                stop_event="timeout-stop-sent",
-                stop_reason=SessionStopReason.TIMEOUT,
-                samples=samples,
-                session_started=session_started,
-                clock=clock,
-                final_status=final_status,
-                accounting=accounting,
-            )
+    accounting = capacity_policy.accounting if capacity_policy else MeasurementAccumulator()
+    try:
+        while True:
+            if clock() >= deadline:
+                return _finish_session(
+                    session=session,
+                    stop_event="timeout-stop-sent",
+                    stop_reason=SessionStopReason.TIMEOUT,
+                    samples=samples,
+                    session_started=session_started,
+                    clock=clock,
+                    final_status=final_status,
+                    accounting=accounting,
+                    capacity_policy=capacity_policy,
+                )
 
+            try:
+                status = read_live_status(
+                    tester,
+                    deadline=deadline,
+                    clock=clock,
+                    require_streamed=require_streamed or capacity_policy is not None,
+                )
+            except _ReadDeadlineReached:
+                continue
+            received_at = clock()
+            if received_at >= deadline:
+                continue
+            final_status = status
+            sample_elapsed = received_at - session_started
+            if capacity_policy is not None:
+                capacity_policy.add(status, sample_elapsed)
+            else:
+                accounting.add(status, sample_elapsed)
+            samples += 1
+
+            # Evaluate receipt-time policies before synchronous output can distort
+            # sample gaps or dwell. The public callback still takes status/count.
+            if completion is not None:
+                completion_reason = completion(status, samples)
+            elif stop_on_cutoff and status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF:
+                completion_reason = SessionStopReason.DEVICE_CUTOFF
+            else:
+                completion_reason = None
+            # Capacity samples must survive an output callback interrupt/failure.
+            if logger is not None and capacity_policy is not None:
+                logger.write(status, event=sample_event, session_elapsed_seconds=sample_elapsed)
+            printer(status)
+            if logger is not None and capacity_policy is None:
+                logger.write(status, event=sample_event, session_elapsed_seconds=sample_elapsed)
+            if (
+                not (capacity_policy is not None and completion_reason is not None)
+                and clock() >= deadline
+            ):
+                continue
+            if completion_reason is not None:
+                return _finish_session(
+                    session=session,
+                    stop_event=f"{completion_reason.value}-stop-sent",
+                    stop_reason=completion_reason,
+                    samples=samples,
+                    session_started=session_started,
+                    clock=clock,
+                    final_status=final_status,
+                    accounting=accounting,
+                    capacity_policy=capacity_policy,
+                )
+
+            if on_sample is not None:
+                on_sample(status, samples)
+            remaining = deadline - clock()
+            if remaining > 0:
+                sleeper(min(poll_interval, remaining))
+    except BaseException as exc:
+        if capacity_policy is not None:
+            _record_capacity_failure(exc, capacity_policy, logger, clock() - session_started)
+        raise
+
+
+def _record_capacity_failure(
+    exc: BaseException,
+    policy: CapacityPolicy,
+    logger: StatusLogger | None,
+    elapsed_seconds: float,
+) -> None:
+    """Attach a typed partial assessment before best-effort durable logging."""
+
+    if isinstance(exc, _SessionSignal):
+        termination = "signal"
+    elif isinstance(exc, KeyboardInterrupt):
+        termination = "interrupted"
+    else:
+        termination = "error"
+    assessment: CapacityAssessment = policy.assess(termination, elapsed_seconds)
+    setattr(exc, "capacity_assessment", assessment)  # noqa: B010 - exceptions keep their original type
+    if logger is not None:
         try:
-            status = read_live_status(
-                tester, deadline=deadline, clock=clock, require_streamed=require_streamed
-            )
-        except _ReadDeadlineReached:
-            continue
-        if clock() >= deadline:
-            continue
-        final_status = status
-        sample_elapsed = clock() - session_started
-        accounting.add(status, sample_elapsed)
-        samples += 1
-
-        # Evaluate receipt-time policies before synchronous output can distort
-        # sample gaps or dwell. The public callback still takes status/count.
-        # This signal is meaningful for capacity tests; generic mode sessions
-        # can supply their own source auto-off and zero-current policy.
-        if completion is not None:
-            completion_reason = completion(status, samples)
-        elif stop_on_cutoff and status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF:
-            completion_reason = SessionStopReason.DEVICE_CUTOFF
-        else:
-            completion_reason = None
-        printer(status)
-        if logger is not None:
-            logger.write(
-                status,
-                event=sample_event,
-                session_elapsed_seconds=sample_elapsed,
-            )
-        if clock() >= deadline:
-            continue
-        if completion_reason is not None:
-            return _finish_session(
-                session=session,
-                stop_event=f"{completion_reason.value}-stop-sent",
-                stop_reason=completion_reason,
-                samples=samples,
-                session_started=session_started,
-                clock=clock,
-                final_status=final_status,
-                accounting=accounting,
-            )
-
-        if on_sample is not None:
-            on_sample(status, samples)
-
-        remaining = deadline - clock()
-        if remaining <= 0:
-            return _finish_session(
-                session=session,
-                stop_event="timeout-stop-sent",
-                stop_reason=SessionStopReason.TIMEOUT,
-                samples=samples,
-                session_started=session_started,
-                clock=clock,
-                final_status=final_status,
-                accounting=accounting,
-            )
-        sleeper(min(poll_interval, remaining))
+            logger.write_event(assessment.event)
+        except Exception as log_error:  # noqa: BLE001 - do not replace the original failure
+            exc.add_note(f"Could not persist partial capacity assessment: {log_error}")
 
 
 def _finish_session(
@@ -317,14 +359,20 @@ def _finish_session(
     clock: Callable[[], float],
     final_status: EbcStatus | None,
     accounting: MeasurementAccumulator,
+    capacity_policy: CapacityPolicy | None = None,
 ) -> SessionResult:
     session.stop(stop_event, raise_errors=True)
+    elapsed = max(0.0, clock() - session_started)
+    capacity = capacity_policy.assess(stop_reason.value, elapsed) if capacity_policy else None
+    if capacity is not None and session.logger is not None:
+        session.logger.write_event(capacity.event)
     return SessionResult(
         stop_reason=stop_reason,
         samples=samples,
-        elapsed_seconds=max(0.0, clock() - session_started),
+        elapsed_seconds=elapsed,
         final_status=final_status,
         measurement=accounting.summary,
+        capacity=capacity,
     )
 
 

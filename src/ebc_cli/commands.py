@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from .capabilities import A10H_CAPABILITIES
+from .capacity import format_capacity_assessment
 from .csvlog import StatusCsvLogger
 from .device import DeviceError
 from .diagnostics import diagnose_device
@@ -25,6 +26,7 @@ from .modes import (
 )
 from .profiles import (
     BulkToFloatProfile,
+    ProfileKind,
     TesterProfile,
     make_bulk_to_float_profile,
     make_capacity_test_profile,
@@ -33,7 +35,7 @@ from .profiles import (
     make_recovery_profile,
 )
 from .protocol import EbcStatus, ProtocolError
-from .report import format_report, load_replay_log, summarize_replay_log
+from .report import ReportError, format_report, load_replay_log, summarize_replay_log
 from .resources import command_resources, reserve_log_path
 from .runner import run_bulk_to_float, run_profile
 from .session import (
@@ -169,13 +171,25 @@ def _run_profile(
             if report_log_before_sampling:
                 _report_log(resources.log_path)
 
-        run = run_profile(
-            resources.tester,
-            profile,
-            logger=resources.logger,
-            on_baseline=on_baseline,
-            on_sample=print_status,
-        )
+        try:
+            run = run_profile(
+                resources.tester,
+                profile,
+                logger=resources.logger,
+                on_baseline=on_baseline,
+                on_sample=print_status,
+            )
+        except BaseException as exc:
+            if profile.kind is ProfileKind.CAPACITY_TEST:
+                try:
+                    partial = getattr(exc, "capacity_assessment", None)
+                    if partial is None and resources.log_path is not None:
+                        partial = summarize_replay_log(load_replay_log(resources.log_path)).capacity
+                    if partial is not None:
+                        print(format_capacity_assessment(partial), flush=True)
+                except (OSError, ReportError) as report_error:
+                    exc.add_note(f"Could not report partial capacity log: {report_error}")
+            raise
         _report_session_result(run.result)
     if not report_log_before_sampling:
         _report_log(resources.log_path)
@@ -225,6 +239,8 @@ def _require_supervised_execution(args: argparse.Namespace, operation: str) -> N
 
 
 def _report_session_result(result: SessionResult) -> None:
+    if result.capacity is not None:
+        print(format_capacity_assessment(result.capacity), flush=True)
     stop_messages = {
         SessionStopReason.TIMEOUT: "Hard timeout reached; stop frame sent.",
         SessionStopReason.BULK_TIMEOUT: (

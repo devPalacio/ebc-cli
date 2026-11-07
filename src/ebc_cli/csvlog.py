@@ -114,7 +114,11 @@ class StatusCsvLogger:
                 event,
                 ""
                 if session_elapsed_seconds is None
-                else f"{max(0.0, session_elapsed_seconds):.3f}",
+                else (
+                    repr(max(0.0, session_elapsed_seconds))
+                    if event in {"capacity-sample", "capacity-test-sample"}
+                    else f"{max(0.0, session_elapsed_seconds):.3f}"
+                ),
                 f"{status.voltage_volts:.3f}",
                 f"{status.current_amps:.3f}",
                 f"{status.power_watts:.3f}",

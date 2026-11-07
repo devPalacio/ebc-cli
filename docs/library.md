@@ -80,8 +80,45 @@ lead-acid-only range. It ends on device CC cutoff or timeout and retains the
 existing discharge accounting and logs. Requests above the load power ceiling
 at the cutoff are rejected before I/O. The device layer also checks CC current
 times baseline voltage against its registered model power limit before START.
-The reported host integral skips
-observation gaps over 30 seconds. It is not a calibration guarantee.
+Capacity completion requires fresh post-start discharge observations before the
+cutoff. A baseline, cached CONNECT reply, or cutoff-only zero-current sample
+cannot establish completion. The result distinguishes completed, incomplete,
+and invalid measurements and retains partial Ah and Wh. A completed test is
+not a battery pass/fail decision.
+
+The reported host integral skips observation gaps over 30 seconds. A gap that
+compromises coverage invalidates the capacity measurement instead of silently
+presenting the smaller integral as full capacity. Requested current is compared
+with observed discharge current; terminal cutoff samples are not mistaken for
+load-regulation failures. These are software quality checks, not a calibration
+guarantee.
+
+Capacity runs expose `run.result.capacity`, a `CapacityAssessment` containing
+`outcome`, `reasons`, `measurement`, `discharge_observed`, `termination`,
+`elapsed_seconds`, `request`, and `unobserved_seconds`. Outcomes are
+`CapacityOutcome.COMPLETED`, `INCOMPLETE`, `INVALID`, or `UNVERIFIED` for logs
+without adequate evidence. `SessionReport.capacity` uses the same type and
+assessment policy. The current screen allows `max(0.02 A, 5% of requested
+current)` error, inclusively. Duplicate or backward observation times cannot
+support a completed measurement.
+
+Exceptions still propagate and trigger STOP cleanup. When logging is enabled,
+accepted samples are flushed before user callbacks so an interrupt does not
+discard the last observation. Partial results can be reconstructed with
+`ebc report PATH`; legacy or ambiguous logs are explicitly unverified. Request
+and assessment metadata use event rows without changing the CSV columns.
+No durable replay is available with `--no-log` or a failed log write. Exceptional
+capacity exits also attach the in-memory partial assessment to the original
+exception as `exc.capacity_assessment`, independent of logging. The original
+exception type and CLI exit behavior remain unchanged.
+
+A cutoff received before the capacity deadline remains eligible even when
+subsequent output delays STOP past that deadline. The endpoint screen allows
+`max(0.10 V, 5% of requested cutoff)` rebound above cutoff; larger discrepancies,
+wrong-mode observations, and terminal current above the requested load plus its
+tolerance invalidate the measurement. Zero or declining current at cutoff is
+allowed. These are engineering consistency checks, not calibrated endpoint
+accuracy or an aircraft maintenance acceptance standard.
 
 ## Two-phase lead-acid charging
 

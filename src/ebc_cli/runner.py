@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from .capacity import CapacityPolicy, CapacityRequest
 from .modes import CCCV_CHARGE
 from .profiles import BulkToFloatProfile, ProfileKind, TesterProfile
 from .protocol import EbcStatus
@@ -18,6 +19,7 @@ from .session import (
     StatusLogger,
     SupervisedSession,
     Tester,
+    _record_capacity_failure,
     run_active_session,
     run_bulk_to_float_session,
 )
@@ -58,28 +60,51 @@ def run_profile(
     ``on_sample`` receives each status frame as it arrives; it is optional so
     this function never writes to stdout on its own. Raises ``DeviceError`` or
     ``ProtocolError`` from the tester, with STOP already attempted.
+
+    Every exceptional capacity exit attaches ``capacity_assessment``, a typed
+    ``CapacityAssessment``, to the original exception without replacing it or
+    its traceback. Retrieve it with ``getattr(exc, "capacity_assessment", None)``;
+    no logger is required. Logging only adds a best-effort durable copy.
     """
 
     completion = _charge_completion(profile, clock) if profile.kind is ProfileKind.CHARGE else None
-    with SupervisedSession(tester=tester, logger=logger) as session:
-        baseline = tester.begin_mode(profile.start_command)
-        session.mark_started(profile.start_event)
-        if logger is not None:
-            logger.write(baseline, event=f"{profile.kind.value}-baseline")
-        if on_baseline is not None:
-            on_baseline(baseline)
-        result = run_active_session(
-            session=session,
-            printer=on_sample or _discard,
-            timeout_minutes=profile.timeout_minutes,
-            sample_event=profile.sample_event,
-            stop_on_cutoff=profile.stop_on_cutoff,
-            completion=completion,
-            require_streamed=profile.kind is ProfileKind.CHARGE,
-            poll_interval=poll_interval,
-            clock=clock,
-            sleeper=sleeper,
+    capacity = None
+    if profile.kind is ProfileKind.CAPACITY_TEST:
+        assert profile.cutoff_volts is not None
+        capacity = CapacityPolicy(
+            CapacityRequest(profile.current_amps, profile.cutoff_volts, profile.timeout_minutes)
         )
+    started_at = clock() if capacity is not None else None
+    try:
+        with SupervisedSession(tester=tester, logger=logger) as session:
+            baseline = tester.begin_mode(profile.start_command)
+            started_at = clock() if capacity is not None else None
+            session.mark_started(profile.start_event)
+            if logger is not None:
+                if capacity is not None:
+                    logger.write_event(capacity.request.event)
+                logger.write(baseline, event=f"{profile.kind.value}-baseline")
+            if on_baseline is not None:
+                on_baseline(baseline)
+            result = run_active_session(
+                session=session,
+                printer=on_sample or _discard,
+                timeout_minutes=profile.timeout_minutes,
+                sample_event=profile.sample_event,
+                stop_on_cutoff=profile.stop_on_cutoff,
+                completion=completion,
+                require_streamed=profile.kind is ProfileKind.CHARGE,
+                capacity_policy=capacity,
+                started_at=started_at,
+                poll_interval=poll_interval,
+                clock=clock,
+                sleeper=sleeper,
+            )
+    except BaseException as exc:
+        if capacity is not None and not hasattr(exc, "capacity_assessment"):
+            assert started_at is not None
+            _record_capacity_failure(exc, capacity, logger, clock() - started_at)
+        raise
     return ProfileRun(baseline=baseline, result=result)
 
 

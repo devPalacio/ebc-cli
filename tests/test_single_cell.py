@@ -304,9 +304,8 @@ class ChargeCompletionTests(unittest.TestCase):
         tester.status.assert_not_called()
         self.assertEqual(tester.stop_calls, 1)
 
-    def test_other_profiles_keep_connect_fallback(self):
+    def test_non_charge_non_capacity_profiles_keep_connect_fallback(self):
         for profile in (
-            make_capacity_test_profile(current_amps=0.5, cutoff_volts=3, timeout_minutes=1),
             make_float_charge_profile(current_amps=0.5, voltage_volts=13.7, timeout_minutes=1),
             make_recovery_profile(current_amps=0.1, timeout_minutes=1),
         ):
@@ -317,12 +316,7 @@ class ChargeCompletionTests(unittest.TestCase):
                 run = run_profile(
                     tester, profile, clock=clock, sleeper=clock.sleep, poll_interval=60
                 )
-                self.assertIs(
-                    run.result.stop_reason,
-                    SessionStopReason.DEVICE_CUTOFF
-                    if profile.kind is ProfileKind.CAPACITY_TEST
-                    else SessionStopReason.TIMEOUT,
-                )
+                self.assertIs(run.result.stop_reason, SessionStopReason.TIMEOUT)
                 self.assertEqual(run.result.samples, 1)
                 tester.status.assert_called_once_with(timeout=60, latest=True)
                 self.assertEqual(tester.stop_calls, 1)
@@ -697,11 +691,14 @@ class GenericCapacityTests(unittest.TestCase):
                 clock = FakeClock()
                 tester = _ScriptedTester(
                     clock,
-                    [(0, _sample(state=0x14, current=0))],
+                    [(0, _sample(state=0x14, current=0, voltage=cutoff))],
                     baseline=_baseline(4.2 if cutoff < 10 else 14.4),
                 )
                 run = run_profile(tester, profile, clock=clock, sleeper=clock.sleep)
                 self.assertIs(run.result.stop_reason, SessionStopReason.DEVICE_CUTOFF)
+                assert run.result.capacity is not None
+                self.assertEqual(run.result.capacity.outcome, "incomplete")
+                self.assertIn("no-observed-discharge", run.result.capacity.reasons)
                 self.assertEqual(tester.commands, [profile.start_command])
                 self.assertEqual(tester.stop_calls, 1)
 
