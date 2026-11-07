@@ -9,9 +9,7 @@ Other model IDs are diagnostic-only. This is not a full port of the
 [EBC-controller GUI](https://github.com/JOGAsoft/EBC-controller).
 
 **Use at your own risk and stay with the battery.** Host timeouts and STOP
-are best-effort, not a safety system. A disconnected cable, hung process, or
-power loss can leave the tester running. A successful serial write does not
-confirm that the tester stopped.
+are best-effort, not a safety system.
 
 ## Install
 
@@ -37,8 +35,7 @@ ebc modes
 ebc plan-mode c_Pb --current 0.5 --cells 6 --timeout-minutes 60
 ```
 
-Live starts require both `--execute` and `--i-am-present`. Choose settings
-for your battery, not just the tester's maximum ratings.
+Live starts require both `--execute` and `--i-am-present`.
 
 ```bash
 ebc capacity-test --current 0.8 --cutoff-voltage 10.5 --timeout-minutes 120 \
@@ -48,13 +45,11 @@ ebc stop --execute
 
 Other profile commands are `recover-lead-acid`, `float-charge`, and
 `bulk-to-float`. `run-mode` exposes the source-defined device modes;
-`Wait` and `Loop` are listed for reference but cannot be run.
-The CP and software-CR captures are short, zero-current smoke checks,
-not proof of working load regulation. See [usage and defaults](docs/usage.md)
+See [usage and defaults](docs/usage.md)
 and [capture evidence](docs/a10h-mode-captures.md) before live use.
 
 Serial commands log to `~/ebc-logs`. Use `--log-dir` or `--no-log` to change
-that. `stop` bypasses the CLI advisory lock and attempts STOP before logging.
+that.
 
 ```bash
 ebc report path/to/session.csv
