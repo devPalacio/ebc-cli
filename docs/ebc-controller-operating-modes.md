@@ -7,11 +7,16 @@ every EBC model accepts the same command.
 
 Sources inspected:
 
-- /home/jay/src/EBC-controller/ebcc.init
-- /home/jay/src/EBC-controller/main.pas
-- /home/jay/src/EBC-controller/stepform.pas
-- /home/jay/src/EBC-controller/stephelp.txt
-- [upstream `ebcc.init`](https://raw.githubusercontent.com/JOGAsoft/EBC-controller/main/ebcc.init)
+- EBC-controller commit `ae13528fe1724ef6825cf6608bb2a033cb1a45a6`;
+- [`ebcc.init`](https://github.com/JOGAsoft/EBC-controller/blob/ae13528fe1724ef6825cf6608bb2a033cb1a45a6/ebcc.init);
+- [`main.pas`](https://github.com/JOGAsoft/EBC-controller/blob/ae13528fe1724ef6825cf6608bb2a033cb1a45a6/main.pas);
+- [`stepform.pas`](https://github.com/JOGAsoft/EBC-controller/blob/ae13528fe1724ef6825cf6608bb2a033cb1a45a6/stepform.pas) and `stephelp.txt`.
+
+See [the comparison](controller-review.md) for deliberate differences, including
+8E1 versus the GUI resource's 8O1, and strict checksums versus Ignore CRC.
+This CLI port is licensed under GPLv3. Attribution and the upstream source
+reference are recorded in [NOTICE](../NOTICE) and
+[source provenance](../PROVENANCE.md).
 
 ## Command frame
 
@@ -142,31 +147,23 @@ Time=t is placed into the device timer field for charge/discharge steps.
 CutAT=minutes is a separate charge-only host dwell after current falls below
 CutA. The source checks charge current and capacity cutoffs, but its energy
 cutoff test is not active; discharge-side host cutoff logic is also much less
-complete than the help text suggests. A CLI implementation should model these
-as explicit host-side policy rather than implying that the tester enforces
-every documented cutoff.
+complete than the help text suggests. The CLI does not implement those
+configurable host cutoffs. Its supported completion policies are documented
+in [usage](usage.md).
 
-## Porting recommendation
+## CLI implementation
 
-The source supports six chemistry charge families, CC discharge, CP discharge,
-and software CR. The safest CLI shape is to make each mode a typed profile with
-an explicit payload strategy:
+`ebc_cli.modes` implements five packet layouts:
 
-1. chemistry charge: current + cell count;
-2. CCCV charge: current + target voltage;
-3. constant-current discharge: current + cutoff voltage;
-4. constant-power discharge: source-specific power + cutoff voltage, with
-   strict byte-range validation;
-5. constant-resistance discharge: feedback-controlled current + cutoff voltage,
-   requiring status samples and periodic adjustment.
+1. chemistry charge: current and cell count;
+2. CCCV charge: current and target voltage;
+3. CC discharge: current and cutoff voltage;
+4. CP discharge: source-specific power encoding and cutoff voltage;
+5. software CR: voltage-dependent current and cutoff voltage, with periodic adjustments.
 
-Wait, Loop, and END belong in a future host step-program layer, not in the
-serial profile builder. The .init data provides no additional model IDs:
-model identity and scaling remain the separate EBC-A05/EBC-A10H registry
-concern.
-
-The Python port now implements the catalog and all five payload strategies as
-checksum-finalized, read-only builders in ``ebc_cli.modes``.  ``ebc modes``
-lists the source catalog and ``ebc plan-mode`` exercises those builders without
-opening a serial device.  Live transmission remains limited to the existing
-validated A10H profiles until captures justify expanding that gate.
+`ebc modes` lists the source catalog. `ebc plan-mode` builds packets without
+opening a device; `ebc run-mode` uses the A10H supervision path. Wait, Loop,
+and END are host program constructs, not supported serial profiles. Model
+identity and scaling live in the separate A05/A10H registry. A05 control is
+disabled. See [usage](usage.md) and [capture evidence](a10h-mode-captures.md)
+for the live-control limits.
