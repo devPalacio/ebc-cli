@@ -1,7 +1,7 @@
 # ZKETECH EBC-A10H operating limits
 
-This note answers the “EBC-10” question for the **EBC-A10H** model. These are
-the tester's documented setting ranges and hardware/power caveats; they are
+These are the **EBC-A10H** tester's documented setting ranges and power
+limits. They are
 not recommended charge settings for a particular battery.
 
 ## Documented ranges
@@ -11,20 +11,13 @@ not recommended charge settings for a particular battery.
 | Charge current | 0.05 A | 5.00 A | 0.01 A; current is reduced automatically when power limits are exceeded |
 | Discharge current | 0.05 A | 10.00 A | 0.01 A; the manual also says the maximum current is constrained by power-current limits |
 | Voltage setting / discharge cutoff | 0.00 V | 30.00 V | 0.01 V |
-| Charge voltage | 0.00 V setting floor | `min(30.00 V, supply voltage − 2 V)` | 0.01 V; the charge ceiling is supply-dependent |
+| Charge voltage | 0.00 V setting floor | 22.00 V | 0.01 V; AC-powered A10H variant |
 
-The EBC-A10H manual gives the current and voltage ranges on its specification
-page and repeats the charge-voltage rule in its precautions. Its examples
-describe discharge as stopping when the measured voltage falls below the
-configured cutoff. The same voltage field is used for discharge cutoffs and
-for the CCCV charge target, while ordinary NiMH/NiCd/LiPo/LiFe/Pb charging
-selects a cell count rather than an arbitrary voltage.
-
-For the common 24 V-powered A10H, the documented charge ceiling is therefore
-22 V. Verify the actual supply/nameplate before relying on that number. The
-manual is internally inconsistent: its specification section says DC 19–24 V,
-while the connection section says DC 12–19 V. The unambiguous rule is the
-relative one: charging must stay at least 2 V below the tester's supply.
+The AC-powered A10H manual variant gives a fixed 0–22 V charging range. Its
+discharge setting range remains 0–30 V. The same voltage field is used for
+discharge cutoffs and for the CCCV charge target, while ordinary
+NiMH/NiCd/LiPo/LiFe/Pb charging selects a cell count rather than an arbitrary
+voltage.
 
 ## Power envelope
 
@@ -51,17 +44,16 @@ tester can reduce current when its power limit is exceeded.
 
 ## What this means for the CLI
 
-The values above are not currently encoded as a complete model capability
-table. The protocol's two-byte encoder can represent values outside the
-A10H's physical range, and `ebcc.init` supplies opcodes/scaling rather than
-numeric safety limits. Live commands should therefore validate against the
-documented A10H limits before transmission; packet encoding alone is not
-evidence that a setpoint is safe or supported.
+The local implementation exposes these values as the `A10H_CAPABILITIES`
+model envelope. The A10H control profile builders and validated live profiles
+check the manual's current and voltage ranges and 0.01-unit resolution before
+a frame can be built. For this AC-powered unit, the envelope uses the fixed
+22 V charge ceiling documented for the AC variant.
 
-The local implementation currently validates its profile-specific policy
-ranges, but does not yet expose a general A10H capability object. Adding that
-model-level envelope is a useful follow-up before enabling additional source
-modes.
+The envelope applies the product site's advertised 150 W class rating as a
+conservative constant-power ceiling for CLI requests. It is an electrical
+product envelope, not a claim about a particular firmware revision's internal
+protection behavior.
 
 ## Sources
 
@@ -77,6 +69,12 @@ modes.
    and [protocol implementation](../src/ebc_cli/protocol.py) — model IDs,
    scaling, opcodes, and packet representation; neither is a substitute for
    the manufacturer's electrical ratings.
+5. [Seeed Studio's AC EBC-A10H listing](https://www.seeedstudio.com/ZKETECH-EBC-A10H-AC-Electronic-Load-Battery-Capacity-Tester-Powe-Supply-Tester-30V-10A-150W-p-4522.html)
+   — the AC-powered product variant and its 30 V / 10 A / 150 W product
+   designation.
+6. [AC-variant EBC-A10H manual summary](https://manuals.plus/asin/B08CDC6BVL)
+   — the 100–240 V AC input and fixed 0–22 V charging range used by this
+   model envelope.
 
 The manual mirror is used because the manufacturer's site exposes the product
 page and downloads dynamically; the PDF itself identifies ZKETECH as the
