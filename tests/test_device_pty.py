@@ -6,18 +6,122 @@ import threading
 import time
 import unittest
 
+from ebc_cli.capabilities import A10H_CAPABILITIES
 from ebc_cli.device import DeviceError, EbcDevice
+from ebc_cli.modes import CCCV_CHARGE, EbcModeCommand, build_mode_packet
 from ebc_cli.protocol import (
     CONNECT,
     FRAME_PREFIX,
     FRAME_SUFFIX,
     STOP,
     checksum,
-    make_cccv_charge_plan,
 )
 
 
 class PtyDeviceTests(unittest.TestCase):
+    def test_session_budget_bounds_a_silent_serial_read(self) -> None:
+        with EbcDevice(self.slave_path, timeout=10) as device:
+            started = time.monotonic()
+            with self.assertRaises(DeviceError):
+                device.next_status(timeout=0.02, latest=True)
+            self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_next_status_latest_returns_newest_buffered_observation(self) -> None:
+        first = _status_frame(voltage_raw=50)
+        middle = _status_frame(voltage_raw=55)
+        newest = _status_frame(voltage_raw=60)
+
+        def peer() -> None:
+            time.sleep(0.02)
+            os.write(self.master_fd, first + middle + newest)
+
+        thread = threading.Thread(target=peer)
+        thread.start()
+        try:
+            with EbcDevice(self.slave_path, timeout=0.5) as device:
+                status = device.next_status(latest=True)
+        finally:
+            thread.join(timeout=1.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(status.voltage_volts, 14.4)
+
+    def test_profile_start_discards_pre_start_completion_frames(self) -> None:
+        baseline = _status_frame(state=0x68)
+        stale_completion = _status_frame(state=0x1A, current_raw=0)
+        running = _status_frame(state=0x68, current_raw=70)
+        expected_profile = build_mode_packet(
+            EbcModeCommand(CCCV_CHARGE, current_amps=0.5, voltage_volts=13.7, timeout_minutes=120),
+            capabilities=A10H_CAPABILITIES,
+        )
+        commands_seen: list[bytes] = []
+        errors: queue.Queue[BaseException] = queue.Queue()
+
+        def peer() -> None:
+            try:
+                while len(commands_seen) < 5:
+                    command = _read_exact(self.master_fd, 10)
+                    commands_seen.append(command)
+                    if command == CONNECT:
+                        if len(commands_seen) == 1:
+                            os.write(self.master_fd, baseline)
+                        else:
+                            # The completion frame is already queued when the
+                            # baseline response is read, so it must be removed
+                            # at the profile start boundary.
+                            os.write(self.master_fd, baseline + stale_completion)
+                    elif command == expected_profile:
+                        os.write(self.master_fd, running)
+            except (AssertionError, EOFError, OSError, TimeoutError) as exc:
+                errors.put(exc)
+
+        thread = threading.Thread(target=peer)
+        thread.start()
+        try:
+            with EbcDevice(self.slave_path, timeout=0.5) as device:
+                device.begin_mode(
+                    EbcModeCommand(
+                        CCCV_CHARGE,
+                        current_amps=0.5,
+                        voltage_volts=13.7,
+                        timeout_minutes=120,
+                    )
+                )
+                status = device.next_status()
+        finally:
+            thread.join(timeout=1.2)
+        self._assert_peer_finished(thread, errors)
+        self.assertIsNone(status.completion_reason)
+        self.assertEqual(commands_seen, [CONNECT, STOP, CONNECT, expected_profile, STOP])
+
+    def test_fresh_status_skips_cached_first_frame(self) -> None:
+        old = _status_frame()
+        fresh = bytearray(old)
+        fresh[4:6] = bytes((60, 0))
+        fresh[17] = checksum(fresh, 17)
+        latest = bytearray(old)
+        latest[4:6] = bytes((65, 0))
+        latest[17] = checksum(latest, 17)
+        errors: queue.Queue[BaseException] = queue.Queue()
+
+        def peer() -> None:
+            try:
+                self.assertEqual(_read_exact(self.master_fd, len(CONNECT)), CONNECT)
+                os.write(self.master_fd, old)
+                time.sleep(0.02)
+                os.write(self.master_fd, bytes(fresh) + bytes(latest))
+            except (AssertionError, EOFError, OSError, TimeoutError) as exc:
+                errors.put(exc)
+
+        thread = threading.Thread(target=peer)
+        thread.start()
+        try:
+            with EbcDevice(self.slave_path, timeout=0.5) as device:
+                status = device.fresh_status()
+            self.assertEqual(status.voltage_volts, 15.6)
+        finally:
+            thread.join(timeout=1.2)
+        self._assert_peer_finished(thread, errors)
+
     def setUp(self) -> None:
         self.master_fd, self.slave_fd = pty.openpty()
         self.slave_path = os.ttyname(self.slave_fd)
@@ -62,6 +166,23 @@ class PtyDeviceTests(unittest.TestCase):
         ):
             device.status()
 
+    def test_fresh_status_does_not_fall_back_when_followup_is_missing(self) -> None:
+        def peer() -> None:
+            _read_exact(self.master_fd, len(CONNECT))
+            os.write(self.master_fd, _status_frame())
+
+        thread = threading.Thread(target=peer)
+        thread.start()
+        try:
+            with (
+                EbcDevice(self.slave_path, timeout=0.05) as device,
+                self.assertRaisesRegex(DeviceError, "could not confirm a fresh status"),
+            ):
+                device.fresh_status()
+        finally:
+            thread.join(timeout=1.2)
+        self.assertFalse(thread.is_alive())
+
     def test_status_disconnect_is_reported_as_a_device_error(self) -> None:
         peer_errors: queue.Queue[BaseException] = queue.Queue()
 
@@ -85,10 +206,9 @@ class PtyDeviceTests(unittest.TestCase):
 
     def test_active_profile_cleanup_sends_stop_through_the_serial_adapter(self) -> None:
         status_frame = _status_frame()
-        expected_profile = make_cccv_charge_plan(
-            current_amps=0.5,
-            voltage_volts=13.7,
-            timeout_minutes=120,
+        expected_profile = build_mode_packet(
+            EbcModeCommand(CCCV_CHARGE, current_amps=0.5, voltage_volts=13.7, timeout_minutes=120),
+            capabilities=A10H_CAPABILITIES,
         )
         commands_seen: list[bytes] = []
         peer_errors: queue.Queue[BaseException] = queue.Queue()
@@ -106,10 +226,13 @@ class PtyDeviceTests(unittest.TestCase):
         thread = threading.Thread(target=peer)
         thread.start()
         with EbcDevice(self.slave_path, timeout=0.5) as device:
-            baseline = device.begin_float_charge(
-                current_amps=0.5,
-                voltage_volts=13.7,
-                timeout_minutes=120,
+            baseline = device.begin_mode(
+                EbcModeCommand(
+                    CCCV_CHARGE,
+                    current_amps=0.5,
+                    voltage_volts=13.7,
+                    timeout_minutes=120,
+                )
             )
         thread.join(timeout=1.0)
         self._assert_peer_finished(thread, peer_errors)
@@ -148,11 +271,12 @@ def _read_exact(fd: int, size: int, timeout: float = 1.0) -> bytes:
     return bytes(received)
 
 
-def _status_frame() -> bytes:
+def _status_frame(*, state: int = 0x68, voltage_raw: int = 50, current_raw: int = 70) -> bytes:
     frame = bytearray(19)
     frame[0] = FRAME_PREFIX
-    frame[2:4] = bytes((0, 70))
-    frame[4:6] = bytes((50, 0))
+    frame[1] = state
+    frame[2:4] = bytes((0, current_raw))
+    frame[4:6] = bytes((voltage_raw, 0))
     frame[6:8] = bytes((0, 100))
     frame[16] = 0x06
     frame[17] = checksum(frame, 17)

@@ -4,11 +4,17 @@
 
 """Typed, validated descriptions of controlled tester profiles."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
 
-from .protocol import EbcStatus
+from .capabilities import A10H_CAPABILITIES, CapabilityError, EbcCapabilities
+from .modes import (
+    CCCV_CHARGE,
+    CONSTANT_CURRENT_DISCHARGE,
+    LEAD_ACID_CHARGE,
+    EbcModeCommand,
+)
 
 
 class ProfileError(ValueError):
@@ -23,24 +29,6 @@ class ProfileKind(StrEnum):
     CAPACITY_TEST = "capacity-test"
 
 
-class ProfileStarter(Protocol):
-    """The device operations needed to start a controlled profile."""
-
-    def begin_lead_acid_charge(self, *, current_amps: float, timeout_minutes: int) -> EbcStatus: ...
-
-    def begin_lead_acid_recovery(
-        self, *, current_amps: float, timeout_minutes: int
-    ) -> EbcStatus: ...
-
-    def begin_float_charge(
-        self, *, current_amps: float, voltage_volts: float, timeout_minutes: int
-    ) -> EbcStatus: ...
-
-    def begin_constant_current_discharge(
-        self, *, current_amps: float, cutoff_volts: float, timeout_minutes: int
-    ) -> EbcStatus: ...
-
-
 @dataclass(frozen=True, slots=True)
 class TesterProfile:
     """A validated operation that can be started on an EBC-A10H."""
@@ -50,9 +38,13 @@ class TesterProfile:
     timeout_minutes: int
     voltage_volts: float | None = None
     cutoff_volts: float | None = None
+    capabilities: EbcCapabilities = A10H_CAPABILITIES
 
     def __post_init__(self) -> None:
+        if not isinstance(self.capabilities, EbcCapabilities):
+            raise ProfileError("capabilities must be an EbcCapabilities instance")
         if self.kind is ProfileKind.RECOVERY:
+            _validate_capability(self.capabilities.validate_charge_current, self.current_amps)
             _require_range(
                 "recovery current",
                 self.current_amps,
@@ -71,6 +63,11 @@ class TesterProfile:
             )
             return
         if self.kind is ProfileKind.FLOAT_CHARGE:
+            _validate_capability(self.capabilities.validate_charge_current, self.current_amps)
+            _validate_capability(
+                self.capabilities.validate_charge_voltage,
+                self.voltage_volts,
+            )
             _require_range(
                 "float-charge current",
                 self.current_amps,
@@ -96,6 +93,11 @@ class TesterProfile:
             )
             return
         if self.kind is ProfileKind.CAPACITY_TEST:
+            _validate_capability(self.capabilities.validate_discharge_current, self.current_amps)
+            _validate_capability(
+                lambda value: self.capabilities.validate_voltage(value, label="cutoff voltage"),
+                self.cutoff_volts,
+            )
             _require_range(
                 "capacity-test current",
                 self.current_amps,
@@ -139,6 +141,31 @@ class TesterProfile:
         return self.kind is ProfileKind.CAPACITY_TEST
 
     @property
+    def start_command(self) -> EbcModeCommand:
+        """Return the device-neutral command for this validated profile."""
+
+        if self.kind is ProfileKind.RECOVERY:
+            return EbcModeCommand(
+                LEAD_ACID_CHARGE,
+                current_amps=self.current_amps,
+                cells=6,
+                timeout_minutes=self.timeout_minutes,
+            )
+        if self.kind is ProfileKind.FLOAT_CHARGE:
+            return EbcModeCommand(
+                CCCV_CHARGE,
+                current_amps=self.current_amps,
+                voltage_volts=self.voltage_volts,
+                timeout_minutes=self.timeout_minutes,
+            )
+        return EbcModeCommand(
+            CONSTANT_CURRENT_DISCHARGE,
+            current_amps=self.current_amps,
+            cutoff_volts=self.cutoff_volts,
+            timeout_minutes=self.timeout_minutes,
+        )
+
+    @property
     def summary(self) -> str:
         if self.kind is ProfileKind.RECOVERY:
             return (
@@ -155,26 +182,6 @@ class TesterProfile:
             f"{self.timeout_minutes}-minute hard timeout"
         )
 
-    def start(self, tester: ProfileStarter) -> EbcStatus:
-        """Start this profile and return the tester's baseline status."""
-
-        if self.kind is ProfileKind.RECOVERY:
-            return tester.begin_lead_acid_recovery(
-                current_amps=self.current_amps,
-                timeout_minutes=self.timeout_minutes,
-            )
-        if self.kind is ProfileKind.FLOAT_CHARGE:
-            return tester.begin_float_charge(
-                current_amps=self.current_amps,
-                voltage_volts=self.voltage_volts,
-                timeout_minutes=self.timeout_minutes,
-            )
-        return tester.begin_constant_current_discharge(
-            current_amps=self.current_amps,
-            cutoff_volts=self.cutoff_volts,
-            timeout_minutes=self.timeout_minutes,
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class BulkToFloatProfile:
@@ -185,8 +192,17 @@ class BulkToFloatProfile:
     float_current_amps: float
     float_voltage_volts: float
     float_timeout_minutes: int
+    capabilities: EbcCapabilities = A10H_CAPABILITIES
 
     def __post_init__(self) -> None:
+        if not isinstance(self.capabilities, EbcCapabilities):
+            raise ProfileError("capabilities must be an EbcCapabilities instance")
+        _validate_capability(self.capabilities.validate_charge_current, self.bulk_current_amps)
+        _validate_capability(self.capabilities.validate_charge_current, self.float_current_amps)
+        _validate_capability(
+            self.capabilities.validate_charge_voltage,
+            self.float_voltage_volts,
+        )
         _require_range(
             "bulk current",
             self.bulk_current_amps,
@@ -236,6 +252,28 @@ class BulkToFloatProfile:
         return "bulk-to-float-float-sample"
 
     @property
+    def bulk_start_command(self) -> EbcModeCommand:
+        """Return the device-neutral command for the bulk phase."""
+
+        return EbcModeCommand(
+            LEAD_ACID_CHARGE,
+            current_amps=self.bulk_current_amps,
+            cells=6,
+            timeout_minutes=self.bulk_timeout_minutes,
+        )
+
+    @property
+    def float_start_command(self) -> EbcModeCommand:
+        """Return the device-neutral command for the float phase."""
+
+        return EbcModeCommand(
+            CCCV_CHARGE,
+            current_amps=self.float_current_amps,
+            voltage_volts=self.float_voltage_volts,
+            timeout_minutes=self.float_timeout_minutes,
+        )
+
+    @property
     def summary(self) -> str:
         return (
             "Bulk-to-float started: PbAc, 6 cells, 14.4 V target, "
@@ -244,47 +282,44 @@ class BulkToFloatProfile:
             f"for up to {self.float_timeout_minutes} minutes"
         )
 
-    def start_bulk(self, tester: ProfileStarter) -> EbcStatus:
-        """Start the PbAc bulk phase and return the tester's baseline status."""
 
-        return tester.begin_lead_acid_charge(
-            current_amps=self.bulk_current_amps,
-            timeout_minutes=self.bulk_timeout_minutes,
-        )
-
-    def start_float(self, tester: ProfileStarter) -> EbcStatus:
-        """Start the CCCV float phase and return the tester's baseline status."""
-
-        return tester.begin_float_charge(
-            current_amps=self.float_current_amps,
-            voltage_volts=self.float_voltage_volts,
-            timeout_minutes=self.float_timeout_minutes,
-        )
-
-
-def make_recovery_profile(*, current_amps: float, timeout_minutes: int) -> TesterProfile:
-    return TesterProfile(ProfileKind.RECOVERY, current_amps, timeout_minutes)
+def make_recovery_profile(
+    *, current_amps: float, timeout_minutes: int, capabilities: EbcCapabilities = A10H_CAPABILITIES
+) -> TesterProfile:
+    return TesterProfile(
+        ProfileKind.RECOVERY, current_amps, timeout_minutes, capabilities=capabilities
+    )
 
 
 def make_float_charge_profile(
-    *, current_amps: float, voltage_volts: float, timeout_minutes: int
+    *,
+    current_amps: float,
+    voltage_volts: float,
+    timeout_minutes: int,
+    capabilities: EbcCapabilities = A10H_CAPABILITIES,
 ) -> TesterProfile:
     return TesterProfile(
         ProfileKind.FLOAT_CHARGE,
         current_amps,
         timeout_minutes,
         voltage_volts=voltage_volts,
+        capabilities=capabilities,
     )
 
 
 def make_capacity_test_profile(
-    *, current_amps: float, cutoff_volts: float, timeout_minutes: int
+    *,
+    current_amps: float,
+    cutoff_volts: float,
+    timeout_minutes: int,
+    capabilities: EbcCapabilities = A10H_CAPABILITIES,
 ) -> TesterProfile:
     return TesterProfile(
         ProfileKind.CAPACITY_TEST,
         current_amps,
         timeout_minutes,
         cutoff_volts=cutoff_volts,
+        capabilities=capabilities,
     )
 
 
@@ -295,6 +330,7 @@ def make_bulk_to_float_profile(
     float_current_amps: float,
     float_voltage_volts: float,
     float_timeout_minutes: int,
+    capabilities: EbcCapabilities = A10H_CAPABILITIES,
 ) -> BulkToFloatProfile:
     """Build a validated, two-stage normal charge profile."""
 
@@ -304,6 +340,7 @@ def make_bulk_to_float_profile(
         float_current_amps=float_current_amps,
         float_voltage_volts=float_voltage_volts,
         float_timeout_minutes=float_timeout_minutes,
+        capabilities=capabilities,
     )
 
 
@@ -321,3 +358,12 @@ def _require_range(
         minimum_text = minimum_text or f"{minimum:g}"
         maximum_text = maximum_text or f"{maximum:g}"
         raise ProfileError(f"{label} must be between {minimum_text} and {maximum_text} {unit}")
+
+
+def _validate_capability(check: Callable[[float], None], value: float | None) -> None:
+    if value is None:
+        return
+    try:
+        check(value)
+    except CapabilityError as exc:
+        raise ProfileError(str(exc)) from exc

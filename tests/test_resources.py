@@ -71,6 +71,38 @@ class ResourceTests(unittest.TestCase):
         self.assertEqual(rows[0][1], "event")
         self.assertEqual(rows[1][1], "schema-v1")
 
+    def test_logged_scopes_reserve_distinct_paths_in_the_same_second(self) -> None:
+        tester = _tester_mock()
+        with TemporaryDirectory() as temporary_directory:
+            with (
+                patch("ebc_cli.resources.EbcDevice", return_value=tester),
+                command_resources(
+                    device="/dev/test",
+                    timeout=1.0,
+                    command="status",
+                    log_dir=temporary_directory,
+                    no_log=False,
+                ) as first,
+            ):
+                first_path = first.log_path
+            with (
+                patch("ebc_cli.resources.EbcDevice", return_value=tester),
+                command_resources(
+                    device="/dev/test",
+                    timeout=1.0,
+                    command="status",
+                    log_dir=temporary_directory,
+                    no_log=False,
+                ) as second,
+            ):
+                second_path = second.log_path
+                self.assertTrue(first_path.exists())
+                self.assertTrue(second_path.exists())
+
+        self.assertIsNotNone(first_path)
+        self.assertIsNotNone(second_path)
+        self.assertNotEqual(first_path, second_path)
+
 
 def _tester_mock() -> MagicMock:
     tester = MagicMock()

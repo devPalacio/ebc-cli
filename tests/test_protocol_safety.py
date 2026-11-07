@@ -2,7 +2,9 @@ import math
 import unittest
 from unittest.mock import Mock, call, patch
 
+from ebc_cli.capabilities import A10H_CAPABILITIES
 from ebc_cli.device import DeviceError, EbcDevice
+from ebc_cli.modes import CCCV_CHARGE, LEAD_ACID_CHARGE, EbcModeCommand, build_mode_packet
 from ebc_cli.protocol import (
     CONNECT,
     FRAME_PREFIX,
@@ -16,13 +18,17 @@ from ebc_cli.protocol import (
     encode_scaled,
     encode_timer,
     find_valid_status_frame,
-    make_cccv_charge_plan,
-    make_lead_acid_charge_plan,
     parse_status,
 )
 
 
 class ProtocolSafetyTests(unittest.TestCase):
+    def test_frame_finder_validates_without_decoding_measurements(self) -> None:
+        frame = status_frame()
+        with patch("ebc_cli.protocol.decode_current") as decode:
+            self.assertEqual(find_valid_status_frame(b"noise" + frame), frame)
+        decode.assert_not_called()
+
     def test_status_requires_frame_suffix(self) -> None:
         frame = bytearray(status_frame())
         frame[-1] = 0x00
@@ -69,6 +75,14 @@ class ProtocolSafetyTests(unittest.TestCase):
         ):
             device._acquire_lock(42)
 
+    def test_device_timeout_rejects_non_finite_values(self) -> None:
+        for timeout in (0, -1, math.nan, math.inf, -math.inf, "not-a-timeout"):
+            with (
+                self.subTest(timeout=timeout),
+                self.assertRaisesRegex(DeviceError, "finite number greater than zero"),
+            ):
+                EbcDevice("/dev/test", timeout=timeout)
+
     def test_device_lock_can_be_disabled(self) -> None:
         device = EbcDevice("/dev/test", timeout=0.1, lock_device=False)
         with patch("ebc_cli.device.fcntl.flock") as flock:
@@ -82,7 +96,14 @@ class ProtocolSafetyTests(unittest.TestCase):
         device._read_status_frame = Mock(return_value=status_frame(model_id=0x99))
 
         with self.assertRaisesRegex(DeviceError, "validated control profile"):
-            device.begin_float_charge(current_amps=0.5, voltage_volts=13.7, timeout_minutes=120)
+            device.begin_mode(
+                EbcModeCommand(
+                    CCCV_CHARGE,
+                    current_amps=0.5,
+                    voltage_volts=13.7,
+                    timeout_minutes=120,
+                )
+            )
 
         device._write_all.assert_called_once_with(CONNECT)
         self.assertFalse(device._control_active)
@@ -104,9 +125,15 @@ class ProtocolSafetyTests(unittest.TestCase):
         device._write_all = Mock()
         device._read_status_frame = Mock(side_effect=[status_frame(), status_frame()])
 
-        baseline = device.begin_float_charge(
-            current_amps=0.5, voltage_volts=13.7, timeout_minutes=120
-        )
+        with patch("ebc_cli.device.termios.tcflush"):
+            baseline = device.begin_mode(
+                EbcModeCommand(
+                    CCCV_CHARGE,
+                    current_amps=0.5,
+                    voltage_volts=13.7,
+                    timeout_minutes=120,
+                )
+            )
 
         self.assertEqual(baseline.model_id, 0x06)
         self.assertTrue(device._control_active)
@@ -117,7 +144,12 @@ class ProtocolSafetyTests(unittest.TestCase):
                 call(STOP),
                 call(CONNECT),
                 call(
-                    make_cccv_charge_plan(current_amps=0.5, voltage_volts=13.7, timeout_minutes=120)
+                    build_mode_packet(
+                        EbcModeCommand(
+                            CCCV_CHARGE, current_amps=0.5, voltage_volts=13.7, timeout_minutes=120
+                        ),
+                        capabilities=A10H_CAPABILITIES,
+                    )
                 ),
             ],
         )
@@ -128,7 +160,10 @@ class ProtocolSafetyTests(unittest.TestCase):
         device._write_all = Mock()
         device._read_status_frame = Mock(side_effect=[status_frame(), status_frame()])
 
-        baseline = device.begin_lead_acid_charge(current_amps=0.8, timeout_minutes=1440)
+        with patch("ebc_cli.device.termios.tcflush"):
+            baseline = device.begin_mode(
+                EbcModeCommand(LEAD_ACID_CHARGE, current_amps=0.8, timeout_minutes=1440, cells=6)
+            )
 
         self.assertEqual(baseline.model_id, 0x06)
         self.assertEqual(
@@ -137,9 +172,44 @@ class ProtocolSafetyTests(unittest.TestCase):
                 call(CONNECT),
                 call(STOP),
                 call(CONNECT),
-                call(make_lead_acid_charge_plan(current_amps=0.8, cells=6, timeout_minutes=1440)),
+                call(
+                    build_mode_packet(
+                        EbcModeCommand(
+                            LEAD_ACID_CHARGE, current_amps=0.8, cells=6, timeout_minutes=1440
+                        ),
+                        capabilities=A10H_CAPABILITIES,
+                    )
+                ),
             ],
         )
+
+    def test_latest_status_fails_safe_on_an_unbounded_backlog(self) -> None:
+        device = EbcDevice(timeout=0.1)
+        device._fd = 1
+        device._rx_buffer.extend(status_frame() * 4098)
+
+        with (
+            patch("ebc_cli.device.select.select", return_value=([], [], [])),
+            self.assertRaisesRegex(DeviceError, "backlog exceeded"),
+        ):
+            device.next_status(latest=True)
+
+    def test_profile_does_not_start_if_pending_input_cannot_be_cleared(self) -> None:
+        device = EbcDevice(timeout=0.1)
+        device._fd = 42
+        device._write_all = Mock()
+        device._read_status_frame = Mock(return_value=status_frame())
+        with (
+            patch("ebc_cli.device.termios.tcflush", side_effect=OSError("disconnected")),
+            self.assertRaisesRegex(DeviceError, "cannot clear pending input"),
+        ):
+            device.begin_mode(
+                EbcModeCommand(CCCV_CHARGE, current_amps=0.5, voltage_volts=13.7, timeout_minutes=1)
+            )
+        self.assertEqual(
+            device._write_all.call_args_list, [call(CONNECT), call(STOP), call(CONNECT)]
+        )
+        self.assertFalse(device._control_active)
 
     def test_close_makes_best_effort_stop_for_active_profile(self) -> None:
         device = EbcDevice(timeout=0.1)

@@ -7,9 +7,12 @@ from tempfile import TemporaryDirectory
 from typing import Self
 from unittest.mock import patch
 
-from ebc_cli import cli, commands, resources, session
+from support import FakeClock
+
+from ebc_cli import cli, commands, resources, runner, session
 from ebc_cli.csvlog import StatusCsvLogger
 from ebc_cli.device import DeviceError
+from ebc_cli.modes import EbcModeCommand
 from ebc_cli.protocol import FRAME_PREFIX, FRAME_SUFFIX, EbcStatus, checksum
 
 
@@ -24,19 +27,10 @@ class FakeTester:
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
         pass
 
-    def begin_float_charge(self, **_kwargs: object) -> EbcStatus:
+    def begin_mode(self, _command: EbcModeCommand) -> EbcStatus:
         return _status()
 
-    def begin_lead_acid_recovery(self, **_kwargs: object) -> EbcStatus:
-        return _status()
-
-    def begin_lead_acid_charge(self, **_kwargs: object) -> EbcStatus:
-        return _status()
-
-    def begin_constant_current_discharge(self, **_kwargs: object) -> EbcStatus:
-        return _status()
-
-    def next_status(self) -> EbcStatus:
+    def next_status(self, *, timeout=None, latest=False) -> EbcStatus:
         if not self.statuses:
             raise DeviceError("fake status stream ended")
         status = self.statuses.pop(0)
@@ -44,22 +38,11 @@ class FakeTester:
             raise status
         return status
 
-    def status(self) -> EbcStatus:
+    def status(self, *, timeout=None, latest=False) -> EbcStatus:
         return self.next_status()
 
     def stop(self) -> None:
         self.stop_calls += 1
-
-
-class FakeClock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.now += seconds
 
 
 class CliSafetyTests(unittest.TestCase):
@@ -76,8 +59,6 @@ class CliSafetyTests(unittest.TestCase):
                 supervised.mark_started("test-started")
                 result = session.run_active_session(
                     session=supervised,
-                    tester=tester,
-                    logger=logger,
                     printer=lambda _status: None,
                     timeout_minutes=1,
                     sample_event="test-sample",
@@ -118,8 +99,6 @@ class CliSafetyTests(unittest.TestCase):
                 supervised.mark_started("test-started")
                 session.run_active_session(
                     session=supervised,
-                    tester=tester,
-                    logger=logger,
                     printer=lambda _status: None,
                     timeout_minutes=1,
                     sample_event="test-sample",
@@ -140,8 +119,6 @@ class CliSafetyTests(unittest.TestCase):
             supervised.mark_started("test-started")
             result = session.run_active_session(
                 session=supervised,
-                tester=tester,
-                logger=None,
                 printer=lambda _status: None,
                 timeout_minutes=1,
                 sample_event="test-sample",
@@ -163,8 +140,6 @@ class CliSafetyTests(unittest.TestCase):
             supervised.mark_started("test-started")
             result = session.run_active_session(
                 session=supervised,
-                tester=tester,
-                logger=None,
                 printer=lambda _status: None,
                 timeout_minutes=1,
                 sample_event="test-sample",
@@ -186,8 +161,6 @@ class CliSafetyTests(unittest.TestCase):
             supervised.mark_started("test-started")
             result = session.run_active_session(
                 session=supervised,
-                tester=tester,
-                logger=None,
                 printer=lambda _status: None,
                 timeout_minutes=0,
                 sample_event="test-sample",
@@ -253,8 +226,6 @@ class CliSafetyTests(unittest.TestCase):
             supervised.mark_started("test-started")
             session.run_active_session(
                 session=supervised,
-                tester=tester,
-                logger=None,
                 printer=lambda _status: None,
                 timeout_minutes=1,
                 sample_event="test-sample",
@@ -272,8 +243,6 @@ class CliSafetyTests(unittest.TestCase):
             supervised.mark_started("test-started")
             session.run_active_session(
                 session=supervised,
-                tester=tester,
-                logger=None,
                 printer=lambda _status: None,
                 timeout_minutes=1,
                 sample_event="test-sample",
@@ -287,7 +256,7 @@ class CliSafetyTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             with (
                 patch.object(resources, "EbcDevice", return_value=tester),
-                patch.object(commands, "run_active_session", autospec=True) as run_session,
+                patch.object(runner, "run_active_session", autospec=True) as run_session,
             ):
                 run_session.return_value = session.SessionResult(
                     stop_reason=session.SessionStopReason.TIMEOUT,
@@ -312,15 +281,15 @@ class CliSafetyTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(run_session.call_count, 1)
         self.assertEqual(tester.stop_calls, 1)
-        self.assertEqual(rows[2][1], "recovery-baseline")
-        self.assertEqual(rows[3][1], "recovery-started")
+        self.assertEqual(rows[2][1], "recovery-started")
+        self.assertEqual(rows[3][1], "recovery-baseline")
 
     def test_bulk_to_float_main_uses_a_supervised_logged_session(self) -> None:
         tester = FakeTester()
         with TemporaryDirectory() as temporary_directory:
             with (
                 patch.object(resources, "EbcDevice", return_value=tester),
-                patch.object(commands, "run_bulk_to_float_session", autospec=True) as run_session,
+                patch.object(runner, "run_bulk_to_float_session", autospec=True) as run_session,
             ):
                 run_session.return_value = session.SessionResult(
                     stop_reason=session.SessionStopReason.FLOAT_TIMEOUT,
@@ -347,8 +316,8 @@ class CliSafetyTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(run_session.call_count, 1)
         self.assertEqual(tester.stop_calls, 1)
-        self.assertEqual(rows[2][1], "bulk-to-float-bulk-baseline")
-        self.assertEqual(rows[3][1], "bulk-to-float-started")
+        self.assertEqual(rows[2][1], "bulk-to-float-started")
+        self.assertEqual(rows[3][1], "bulk-to-float-bulk-baseline")
 
 
 def _status(*, state: int = 0x68) -> EbcStatus:

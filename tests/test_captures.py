@@ -6,6 +6,7 @@ from ebc_cli.csvlog import CSV_HEADER, CSV_SCHEMA_VERSION, schema_version_from_e
 from ebc_cli.protocol import EBC_A10H_MODEL_ID, parse_status
 
 FIXTURE_PATH = Path(__file__).with_name("fixtures") / "a10h_session.csv"
+LIVE_FIXTURE_PATH = Path(__file__).with_name("fixtures") / "a10h_live_cycles.csv"
 
 
 class CapturedSessionFixtureTests(unittest.TestCase):
@@ -31,18 +32,39 @@ class CapturedSessionFixtureTests(unittest.TestCase):
         self.assertEqual([status.current_amps for status in decoded], [0.8, 0.8, 0.0])
         self.assertEqual([status.capacity_ah for status in decoded], [0.0, 0.2, 6.4])
 
-    def test_fixture_measurement_columns_match_raw_frames(self) -> None:
-        with FIXTURE_PATH.open(newline="", encoding="utf-8") as fixture_file:
-            rows = [row for row in csv.DictReader(fixture_file) if row["raw_frame_hex"]]
+    def test_live_fixture_preserves_observed_state_and_timer_variants(self) -> None:
+        rows = self._status_rows(LIVE_FIXTURE_PATH)
+        statuses = tuple(parse_status(bytes.fromhex(row["raw_frame_hex"])) for row in rows)
 
-        for row in rows:
-            status = parse_status(bytes.fromhex(row["raw_frame_hex"]))
-            self.assertEqual(float(row["voltage_v"]), status.voltage_volts)
-            self.assertEqual(float(row["current_a"]), status.current_amps)
-            self.assertEqual(float(row["capacity_ah"]), status.capacity_ah)
-            self.assertEqual(int(row["device_timer_min"]), status.device_timer_minutes)
-            self.assertEqual(row["model_id"], f"0x{status.model_id:02X}")
-            self.assertEqual(row["model_name"], status.model_name)
+        self.assertEqual(
+            tuple(status.state_byte for status in statuses),
+            (0x06, 0x74, 0x10, 0x6E, 0x0A, 0x6E),
+        )
+        self.assertEqual(
+            tuple(status.device_timer_minutes for status in statuses),
+            (999, 1031, 1, 1031, 1, 1031),
+        )
+        self.assertEqual(tuple(status.model_id for status in statuses), (0x06,) * 6)
+        self.assertEqual(
+            tuple(status.current_amps for status in statuses), (0.0, 0.0, 0.05, 0.0, 0.1, 0.1)
+        )
+
+    def test_fixture_measurement_columns_match_raw_frames(self) -> None:
+        for fixture_path in (FIXTURE_PATH, LIVE_FIXTURE_PATH):
+            with self.subTest(fixture=fixture_path.name):
+                for row in self._status_rows(fixture_path):
+                    status = parse_status(bytes.fromhex(row["raw_frame_hex"]))
+                    self.assertEqual(float(row["voltage_v"]), status.voltage_volts)
+                    self.assertEqual(float(row["current_a"]), status.current_amps)
+                    self.assertEqual(float(row["capacity_ah"]), status.capacity_ah)
+                    self.assertEqual(int(row["device_timer_min"]), status.device_timer_minutes)
+                    self.assertEqual(row["model_id"], f"0x{status.model_id:02X}")
+                    self.assertEqual(row["model_name"], status.model_name)
+
+    @staticmethod
+    def _status_rows(path: Path) -> list[dict[str, str]]:
+        with path.open(newline="", encoding="utf-8") as fixture_file:
+            return [row for row in csv.DictReader(fixture_file) if row["raw_frame_hex"]]
 
 
 if __name__ == "__main__":

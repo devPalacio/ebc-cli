@@ -9,23 +9,25 @@ keeps one canonical copy of that catalog and provides typed packet builders
 for the device-facing entries.  Builders only construct and validate bytes;
 they never open a serial device or transmit anything.
 
-The existing CLI has validated live A10H paths for PbAc, CCCV, and
-constant-current discharge.  The other source modes are available for
-read-only inspection and packet research until representative captures make
-their control behavior safe to enable.
+The CLI exposes the same source-defined device modes through read-only packet
+planning and a supervised live run path. Builders only construct and validate
+bytes; device lifecycle, timeout, logging, and STOP handling stay in the CLI
+session layer.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
 
+from .capabilities import CapabilityError, EbcCapabilities
 from .protocol import (
     EBC_A10H_MODEL_ID,
     FRAME_PREFIX,
     FRAME_SUFFIX,
     ProtocolError,
+    decode_current,
     encode_scaled,
     encode_timer,
     finalize_command,
@@ -213,7 +215,7 @@ class EbcOperatingMode:
         if not self.validated_model_ids:
             return "source metadata only; control not enabled"
         models = ", ".join(f"0x{model_id:02X}" for model_id in sorted(self.validated_model_ids))
-        return f"control validated for {models}"
+        return f"control enabled for {models}"
 
     @property
     def source_frame_templates(self) -> tuple[str, ...]:
@@ -246,6 +248,151 @@ class EbcOperatingMode:
 
         frame = bytearray((FRAME_PREFIX, self.opcode_for(phase), 0, 0, 0, 0, 0, 0, 0, FRAME_SUFFIX))
         return finalize_command(frame)
+
+
+@dataclass(frozen=True, slots=True)
+class EbcModeCommand:
+    """One device-mode operation with the parameters needed to build a frame."""
+
+    mode: EbcOperatingMode
+    timeout_minutes: int = 60
+    current_amps: float | None = None
+    cells: int | None = None
+    voltage_volts: float | None = None
+    cutoff_volts: float | None = None
+    power_watts: float | None = None
+    resistance_ohms: float | None = None
+    observed_voltage_volts: float | None = None
+    phase: EbcModePhase = EbcModePhase.START
+
+    def __post_init__(self) -> None:
+        if self.mode.kind is EbcModeKind.PROGRAM_CONTROL:
+            raise ProtocolError(
+                f"{self.mode.command} is host program control and has no serial packet"
+            )
+        try:
+            phase = EbcModePhase(self.phase)
+        except ValueError as exc:
+            raise ProtocolError(f"unsupported mode phase: {self.phase!r}") from exc
+        object.__setattr__(self, "phase", phase)
+        required = {
+            EbcModeKind.CELL_CHARGE: (("current", self.current_amps), ("cells", self.cells)),
+            EbcModeKind.CCCV_CHARGE: (
+                ("current", self.current_amps),
+                ("voltage", self.voltage_volts),
+            ),
+            EbcModeKind.CONSTANT_CURRENT_DISCHARGE: (
+                ("current", self.current_amps),
+                ("cutoff voltage", self.cutoff_volts),
+            ),
+            EbcModeKind.CONSTANT_POWER_DISCHARGE: (
+                ("power", self.power_watts),
+                ("cutoff voltage", self.cutoff_volts),
+            ),
+            EbcModeKind.SOFTWARE_CONSTANT_RESISTANCE: (
+                ("resistance", self.resistance_ohms),
+                ("cutoff voltage", self.cutoff_volts),
+            ),
+        }[self.mode.kind]
+        for label, value in required:
+            if value is None:
+                raise ProtocolError(f"{self.mode.command} requires {label}")
+
+    def validate_live(self, capabilities: EbcCapabilities) -> None:
+        """Validate static live-control policy without reading a CR baseline."""
+
+        if not isinstance(capabilities, EbcCapabilities):
+            raise ProtocolError("capabilities must be an EbcCapabilities instance")
+        if (
+            isinstance(self.timeout_minutes, bool)
+            or not isinstance(self.timeout_minutes, int)
+            or not 1 <= self.timeout_minutes < 256 * 240
+        ):
+            raise ProtocolError("live timeout must be between 1 and 61439 minutes")
+        if self.mode.kind is EbcModeKind.SOFTWARE_CONSTANT_RESISTANCE:
+            assert self.resistance_ohms is not None and self.cutoff_volts is not None
+            _finite_positive(self.resistance_ohms, "resistance")
+            _validate_capability(capabilities.validate_voltage, self.cutoff_volts, "cutoff voltage")
+            return
+        if self.mode.kind is EbcModeKind.CONSTANT_POWER_DISCHARGE:
+            assert self.power_watts is not None
+            power = _finite_nonnegative(self.power_watts, "power")
+            if not power.is_integer():
+                raise ProtocolError("live constant power requires whole watts")
+        build_mode_packet(self, capabilities=capabilities)
+
+    def with_observed_voltage(
+        self,
+        voltage_volts: float,
+        *,
+        phase: EbcModePhase | None = None,
+    ) -> EbcModeCommand:
+        """Return a CR command using a newly sampled battery voltage."""
+
+        return replace(
+            self,
+            observed_voltage_volts=voltage_volts,
+            phase=self.phase if phase is None else phase,
+        )
+
+
+def build_mode_packet(
+    command: EbcModeCommand,
+    *,
+    current_factor: float = 1.0,
+    voltage_factor: float = 1.0,
+    capabilities: EbcCapabilities | None = None,
+) -> bytes:
+    """Build any source-defined device-mode packet without opening hardware."""
+
+    mode = command.mode
+    if mode.kind is EbcModeKind.CELL_CHARGE:
+        return build_cell_charge_packet(
+            mode,
+            current_amps=command.current_amps,
+            cells=command.cells,
+            timeout_minutes=command.timeout_minutes,
+            phase=command.phase,
+            current_factor=current_factor,
+            capabilities=capabilities,
+        )
+    if mode.kind is EbcModeKind.CCCV_CHARGE:
+        return build_cccv_charge_packet(
+            mode,
+            current_amps=command.current_amps,
+            voltage_volts=command.voltage_volts,
+            timeout_minutes=command.timeout_minutes,
+            phase=command.phase,
+            current_factor=current_factor,
+            voltage_factor=voltage_factor,
+            capabilities=capabilities,
+        )
+    if mode.kind is EbcModeKind.SOFTWARE_CONSTANT_RESISTANCE:
+        if command.observed_voltage_volts is None:
+            raise ProtocolError("d_CR requires an observed voltage before its frame can be built")
+        return build_constant_resistance_packet(
+            mode,
+            resistance_ohms=command.resistance_ohms,
+            observed_voltage_volts=command.observed_voltage_volts,
+            cutoff_volts=command.cutoff_volts,
+            timeout_minutes=command.timeout_minutes,
+            phase=command.phase,
+            current_factor=current_factor,
+            voltage_factor=voltage_factor,
+            capabilities=capabilities,
+        )
+    return build_discharge_packet(
+        mode,
+        value=command.current_amps
+        if mode.kind is EbcModeKind.CONSTANT_CURRENT_DISCHARGE
+        else command.power_watts,
+        cutoff_volts=command.cutoff_volts,
+        timeout_minutes=command.timeout_minutes,
+        phase=command.phase,
+        current_factor=current_factor,
+        voltage_factor=voltage_factor,
+        capabilities=capabilities,
+    )
 
 
 def _finite_nonnegative(value: float, label: str) -> float:
@@ -309,6 +456,7 @@ def build_cell_charge_packet(
     timeout_minutes: int,
     phase: EbcModePhase | str = EbcModePhase.START,
     current_factor: float = 1.0,
+    capabilities: EbcCapabilities | None = None,
 ) -> bytes:
     """Build a NiMH, NiCd, LiPo, LiFe, or PbAc charge packet."""
 
@@ -316,6 +464,14 @@ def build_cell_charge_packet(
         raise ProtocolError(f"mode {mode.command} is not a cell-based charge mode")
     if isinstance(cells, bool) or not isinstance(cells, int) or not 1 <= cells <= 0xFF:
         raise ProtocolError("cell count must be an integer from 1 to 255")
+    if capabilities is not None:
+        _validate_capability(capabilities.validate_charge_current, current_amps, "charge current")
+        if mode.cell_voltage_volts is not None:
+            _validate_capability(
+                capabilities.validate_charge_voltage,
+                cells * mode.cell_voltage_volts,
+                "charge voltage",
+            )
     return _apply_payload(
         mode,
         phase,
@@ -334,11 +490,15 @@ def build_cccv_charge_packet(
     phase: EbcModePhase | str = EbcModePhase.START,
     current_factor: float = 1.0,
     voltage_factor: float = 1.0,
+    capabilities: EbcCapabilities | None = None,
 ) -> bytes:
     """Build a CCCV charge packet."""
 
     if mode.kind is not EbcModeKind.CCCV_CHARGE:
         raise ProtocolError(f"mode {mode.command} is not a CCCV charge mode")
+    if capabilities is not None:
+        _validate_capability(capabilities.validate_charge_current, current_amps, "charge current")
+        _validate_capability(capabilities.validate_charge_voltage, voltage_volts, "charge voltage")
     return _apply_payload(
         mode,
         phase,
@@ -357,15 +517,24 @@ def build_discharge_packet(
     phase: EbcModePhase | str = EbcModePhase.START,
     current_factor: float = 1.0,
     voltage_factor: float = 1.0,
+    capabilities: EbcCapabilities | None = None,
 ) -> bytes:
     """Build a constant-current or constant-power discharge packet."""
 
     if mode.kind is EbcModeKind.CONSTANT_CURRENT_DISCHARGE:
+        if capabilities is not None:
+            _validate_capability(
+                capabilities.validate_discharge_current, value, "discharge current"
+            )
         first = encode_scaled(value, _validated_factor(current_factor, "current factor"))
     elif mode.kind is EbcModeKind.CONSTANT_POWER_DISCHARGE:
+        if capabilities is not None:
+            _validate_capability(capabilities.validate_power, value, "power")
         first = encode_power(value)
     else:
         raise ProtocolError(f"mode {mode.command} is not a direct discharge mode")
+    if capabilities is not None:
+        _validate_capability(capabilities.validate_voltage, cutoff_volts, "cutoff voltage")
     return _apply_payload(
         mode,
         phase,
@@ -385,6 +554,7 @@ def build_constant_resistance_packet(
     phase: EbcModePhase | str = EbcModePhase.START,
     current_factor: float = 1.0,
     voltage_factor: float = 1.0,
+    capabilities: EbcCapabilities | None = None,
 ) -> bytes:
     """Build the GUI's software constant-resistance adjustment packet.
 
@@ -399,13 +569,36 @@ def build_constant_resistance_packet(
     resistance = _finite_positive(resistance_ohms, "resistance")
     observed_voltage = _finite_nonnegative(observed_voltage_volts, "observed voltage")
     current = observed_voltage / resistance
+    factor = _validated_factor(current_factor, "current factor")
+    current_bytes = encode_scaled(current, factor)
+    if capabilities is not None:
+        minimum = capabilities.discharge_current_min_amps
+        maximum = capabilities.discharge_current_max_amps
+        if not minimum <= current <= maximum:
+            raise ProtocolError(f"discharge current must be between {minimum:g} and {maximum:g} A")
+        _validate_capability(
+            capabilities.validate_discharge_current,
+            decode_current(current_bytes, factor),
+            "discharge current",
+        )
+        _validate_capability(capabilities.validate_voltage, cutoff_volts, "cutoff voltage")
     return _apply_payload(
         mode,
         phase,
-        encode_scaled(current, _validated_factor(current_factor, "current factor")),
+        current_bytes,
         encode_scaled(cutoff_volts, _validated_factor(voltage_factor, "voltage factor")),
         timeout_minutes,
     )
+
+
+def _validate_capability(check, value: float, label: str) -> None:
+    try:
+        check(value)
+    except CapabilityError as exc:
+        message = str(exc)
+        if " must " in message:
+            message = f"{label} must {message.split(' must ', 1)[1]}"
+        raise ProtocolError(message) from exc
 
 
 # These entries mirror the source's device-facing sections.  Section numbers
@@ -419,6 +612,7 @@ NIMH_CHARGE: Final = EbcOperatingMode(
     start_opcode=0x21,
     cont_opcode=0x28,
     auto_off_code=0x16,
+    validated_model_ids=frozenset({EBC_A10H_MODEL_ID}),
 )
 NICD_CHARGE: Final = EbcOperatingMode(
     section=2,
@@ -428,6 +622,7 @@ NICD_CHARGE: Final = EbcOperatingMode(
     start_opcode=0x31,
     cont_opcode=0x38,
     auto_off_code=0x17,
+    validated_model_ids=frozenset({EBC_A10H_MODEL_ID}),
 )
 LIPO_CHARGE: Final = EbcOperatingMode(
     section=4,
@@ -438,6 +633,7 @@ LIPO_CHARGE: Final = EbcOperatingMode(
     cont_opcode=0x48,
     auto_off_code=0x18,
     cell_voltage_volts=4.2,
+    validated_model_ids=frozenset({EBC_A10H_MODEL_ID}),
 )
 LIFE_CHARGE: Final = EbcOperatingMode(
     section=5,
@@ -448,6 +644,7 @@ LIFE_CHARGE: Final = EbcOperatingMode(
     cont_opcode=0x58,
     auto_off_code=0x19,
     cell_voltage_volts=3.65,
+    validated_model_ids=frozenset({EBC_A10H_MODEL_ID}),
 )
 LEAD_ACID_CHARGE: Final = EbcOperatingMode(
     section=6,
@@ -492,6 +689,7 @@ CONSTANT_POWER_DISCHARGE: Final = EbcOperatingMode(
     cont_opcode=0x18,
     auto_off_code=0x15,
     value=EbcModeValue.POWER,
+    validated_model_ids=frozenset({EBC_A10H_MODEL_ID}),
 )
 CONSTANT_RESISTANCE_DISCHARGE: Final = EbcOperatingMode(
     section=11,
@@ -503,6 +701,7 @@ CONSTANT_RESISTANCE_DISCHARGE: Final = EbcOperatingMode(
     adjust_opcode=0x07,
     auto_off_code=0xFF,
     value=EbcModeValue.RESISTANCE,
+    validated_model_ids=frozenset({EBC_A10H_MODEL_ID}),
 )
 WAIT_CONTROL: Final = EbcOperatingMode(
     section=12,
@@ -546,168 +745,4 @@ def get_operating_mode(command: str) -> EbcOperatingMode | None:
     return next(
         (mode for mode in SOURCE_OPERATING_MODES if mode.command.casefold() == normalized),
         None,
-    )
-
-
-def make_nimh_charge_packet(
-    *,
-    current_amps: float,
-    cells: int,
-    timeout_minutes: int,
-    phase: EbcModePhase | str = EbcModePhase.START,
-) -> bytes:
-    """Build a source-defined NiMH packet without transmitting it."""
-
-    return build_cell_charge_packet(
-        NIMH_CHARGE,
-        current_amps=current_amps,
-        cells=cells,
-        timeout_minutes=timeout_minutes,
-        phase=phase,
-    )
-
-
-def make_nicd_charge_packet(
-    *,
-    current_amps: float,
-    cells: int,
-    timeout_minutes: int,
-    phase: EbcModePhase | str = EbcModePhase.START,
-) -> bytes:
-    """Build a source-defined NiCd packet without transmitting it."""
-
-    return build_cell_charge_packet(
-        NICD_CHARGE,
-        current_amps=current_amps,
-        cells=cells,
-        timeout_minutes=timeout_minutes,
-        phase=phase,
-    )
-
-
-def make_lipo_charge_packet(
-    *,
-    current_amps: float,
-    cells: int,
-    timeout_minutes: int,
-    phase: EbcModePhase | str = EbcModePhase.START,
-) -> bytes:
-    """Build a source-defined LiPo packet without transmitting it."""
-
-    return build_cell_charge_packet(
-        LIPO_CHARGE,
-        current_amps=current_amps,
-        cells=cells,
-        timeout_minutes=timeout_minutes,
-        phase=phase,
-    )
-
-
-def make_life_charge_packet(
-    *,
-    current_amps: float,
-    cells: int,
-    timeout_minutes: int,
-    phase: EbcModePhase | str = EbcModePhase.START,
-) -> bytes:
-    """Build a source-defined LiFe packet without transmitting it."""
-
-    return build_cell_charge_packet(
-        LIFE_CHARGE,
-        current_amps=current_amps,
-        cells=cells,
-        timeout_minutes=timeout_minutes,
-        phase=phase,
-    )
-
-
-def make_lead_acid_charge_packet(
-    *,
-    current_amps: float,
-    cells: int,
-    timeout_minutes: int,
-    phase: EbcModePhase | str = EbcModePhase.START,
-) -> bytes:
-    """Build a source-defined PbAc packet without transmitting it."""
-
-    return build_cell_charge_packet(
-        LEAD_ACID_CHARGE,
-        current_amps=current_amps,
-        cells=cells,
-        timeout_minutes=timeout_minutes,
-        phase=phase,
-    )
-
-
-def make_cccv_charge_packet(
-    *,
-    current_amps: float,
-    voltage_volts: float,
-    timeout_minutes: int,
-    phase: EbcModePhase | str = EbcModePhase.START,
-) -> bytes:
-    """Build a source-defined CCCV packet without transmitting it."""
-
-    return build_cccv_charge_packet(
-        CCCV_CHARGE,
-        current_amps=current_amps,
-        voltage_volts=voltage_volts,
-        timeout_minutes=timeout_minutes,
-        phase=phase,
-    )
-
-
-def make_constant_current_discharge_packet(
-    *,
-    current_amps: float,
-    cutoff_volts: float,
-    timeout_minutes: int,
-    phase: EbcModePhase | str = EbcModePhase.START,
-) -> bytes:
-    """Build a source-defined constant-current packet without transmitting it."""
-
-    return build_discharge_packet(
-        CONSTANT_CURRENT_DISCHARGE,
-        value=current_amps,
-        cutoff_volts=cutoff_volts,
-        timeout_minutes=timeout_minutes,
-        phase=phase,
-    )
-
-
-def make_constant_power_discharge_packet(
-    *,
-    power_watts: float,
-    cutoff_volts: float,
-    timeout_minutes: int,
-    phase: EbcModePhase | str = EbcModePhase.START,
-) -> bytes:
-    """Build a source-defined constant-power packet without transmitting it."""
-
-    return build_discharge_packet(
-        CONSTANT_POWER_DISCHARGE,
-        value=power_watts,
-        cutoff_volts=cutoff_volts,
-        timeout_minutes=timeout_minutes,
-        phase=phase,
-    )
-
-
-def make_constant_resistance_discharge_packet(
-    *,
-    resistance_ohms: float,
-    observed_voltage_volts: float,
-    cutoff_volts: float,
-    timeout_minutes: int,
-    phase: EbcModePhase | str = EbcModePhase.START,
-) -> bytes:
-    """Build a source-defined software-CR packet without transmitting it."""
-
-    return build_constant_resistance_packet(
-        CONSTANT_RESISTANCE_DISCHARGE,
-        resistance_ohms=resistance_ohms,
-        observed_voltage_volts=observed_voltage_volts,
-        cutoff_volts=cutoff_volts,
-        timeout_minutes=timeout_minutes,
-        phase=phase,
     )

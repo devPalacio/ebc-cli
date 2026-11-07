@@ -40,15 +40,29 @@ def command_resources(
     command, which must remain usable when another CLI process owns the port.
     """
 
-    log_path = None if no_log else _log_path(command, log_dir)
     with EbcDevice(device, timeout, lock_device=lock_device) as tester:
-        if log_path is None:
+        if no_log:
             yield CommandResources(tester=tester, logger=None, log_path=None)
             return
+        log_path = reserve_log_path(command, log_dir)
         with StatusCsvLogger(log_path) as logger:
             yield CommandResources(tester=tester, logger=logger, log_path=log_path)
 
 
-def _log_path(command: str, log_dir: str | Path) -> Path:
-    filename = f"{datetime.now(tz=UTC).astimezone().strftime('%Y%m%d-%H%M%S')}_{command}.csv"
-    return Path(log_dir).expanduser() / filename
+def reserve_log_path(command: str, log_dir: str | Path) -> Path:
+    """Atomically reserve a distinct CSV path, even for simultaneous commands."""
+
+    directory = Path(log_dir).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = f"{datetime.now(tz=UTC).astimezone().strftime('%Y%m%d-%H%M%S')}_{command}"
+    suffix = 0
+    while True:
+        collision_suffix = "" if suffix == 0 else f"-{suffix}"
+        path = directory / f"{stem}{collision_suffix}.csv"
+        try:
+            with path.open("x", encoding="utf-8", newline=""):
+                pass
+        except FileExistsError:
+            suffix += 1
+            continue
+        return path

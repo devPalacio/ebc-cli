@@ -13,6 +13,7 @@ from ebc_cli.modes import (
     OPERATING_MODES,
     SOURCE_OPERATING_MODES,
     WAIT_CONTROL,
+    EbcModeCommand,
     EbcModeKind,
     EbcModePhase,
     EbcModeValue,
@@ -21,16 +22,11 @@ from ebc_cli.modes import (
     build_cell_charge_packet,
     build_constant_resistance_packet,
     build_discharge_packet,
+    build_mode_packet,
     encode_power,
     get_operating_mode,
-    make_constant_power_discharge_packet,
-    make_constant_resistance_discharge_packet,
-    make_life_charge_packet,
-    make_lipo_charge_packet,
-    make_nicd_charge_packet,
-    make_nimh_charge_packet,
 )
-from ebc_cli.protocol import EBC_A10H_MODEL_ID, ProtocolError, checksum
+from ebc_cli.protocol import ProtocolError, checksum
 
 
 class OperatingModeCatalogTests(unittest.TestCase):
@@ -81,17 +77,6 @@ class OperatingModeCatalogTests(unittest.TestCase):
                 values,
             )
 
-    def test_only_existing_live_profiles_are_marked_control_ready(self) -> None:
-        self.assertFalse(NIMH_CHARGE.control_ready)
-        self.assertFalse(NICD_CHARGE.control_ready)
-        self.assertFalse(LIPO_CHARGE.control_ready)
-        self.assertFalse(LIFE_CHARGE.control_ready)
-        self.assertTrue(CCCV_CHARGE.is_control_ready_for(EBC_A10H_MODEL_ID))
-        self.assertTrue(CONSTANT_CURRENT_DISCHARGE.is_control_ready_for(EBC_A10H_MODEL_ID))
-        self.assertFalse(CONSTANT_POWER_DISCHARGE.control_ready)
-        self.assertFalse(CONSTANT_RESISTANCE_DISCHARGE.control_ready)
-        self.assertFalse(CONSTANT_RESISTANCE_DISCHARGE.is_control_ready_for(EBC_A10H_MODEL_ID))
-
     def test_empty_packet_selects_source_opcode_and_valid_checksum(self) -> None:
         packet = NIMH_CHARGE.empty_packet(EbcModePhase.START)
         self.assertEqual(packet.hex().upper(), "FA2100000000000021F8")
@@ -100,21 +85,53 @@ class OperatingModeCatalogTests(unittest.TestCase):
 
 
 class OperatingModePacketTests(unittest.TestCase):
+    def test_generic_mode_command_builds_the_standalone_packet(self) -> None:
+        command = EbcModeCommand(
+            mode=CONSTANT_POWER_DISCHARGE,
+            power_watts=10,
+            cutoff_volts=10.5,
+            timeout_minutes=60,
+        )
+        self.assertEqual(
+            build_mode_packet(command).hex().upper(),
+            "FA11000A045A003C79F8",
+        )
+
+    def test_generic_constant_resistance_command_can_update_observed_voltage(self) -> None:
+        command = EbcModeCommand(
+            mode=CONSTANT_RESISTANCE_DISCHARGE,
+            resistance_ohms=10,
+            cutoff_volts=10.5,
+            timeout_minutes=60,
+            observed_voltage_volts=12,
+        )
+        adjusted = command.with_observed_voltage(11, phase=EbcModePhase.ADJUST)
+        self.assertEqual(build_mode_packet(command)[2:4], bytes((0, 120)))
+        self.assertEqual(build_mode_packet(adjusted)[1], 0x07)
+
     def test_cell_charge_modes_use_current_and_cell_count_fields(self) -> None:
         self.assertEqual(
-            make_nimh_charge_packet(current_amps=0.75, cells=4, timeout_minutes=180).hex().upper(),
+            build_cell_charge_packet(NIMH_CHARGE, current_amps=0.75, cells=4, timeout_minutes=180)
+            .hex()
+            .upper(),
             "FA21004B000400B4DAF8",
         )
         self.assertEqual(
-            make_nicd_charge_packet(current_amps=0.5, cells=3, timeout_minutes=60).hex().upper(),
+            build_cell_charge_packet(NICD_CHARGE, current_amps=0.5, cells=3, timeout_minutes=60)
+            .hex()
+            .upper(),
             "FA3100320003003C3CF8",
         )
         self.assertEqual(
-            make_lipo_charge_packet(current_amps=1.0, cells=2, timeout_minutes=90).hex().upper(),
+            build_cell_charge_packet(LIPO_CHARGE, current_amps=1.0, cells=2, timeout_minutes=90)
+            .hex()
+            .upper(),
             "FA4100640002005A7DF8",
         )
         self.assertEqual(
-            make_life_charge_packet(current_amps=0.4, cells=4, timeout_minutes=120).hex().upper(),
+            build_cell_charge_packet(LIFE_CHARGE, current_amps=0.4, cells=4, timeout_minutes=120)
+            .hex()
+            .upper(),
             "FA5100280004007805F8",
         )
 
@@ -141,8 +158,9 @@ class OperatingModePacketTests(unittest.TestCase):
     def test_constant_power_encoding_and_packet(self) -> None:
         self.assertEqual(encode_power(10), bytes((0, 10)))
         self.assertEqual(encode_power(240), bytes((1, 0)))
-        packet = make_constant_power_discharge_packet(
-            power_watts=10,
+        packet = build_discharge_packet(
+            CONSTANT_POWER_DISCHARGE,
+            value=10,
             cutoff_volts=10.5,
             timeout_minutes=60,
         )
@@ -159,7 +177,8 @@ class OperatingModePacketTests(unittest.TestCase):
         )
 
     def test_constant_resistance_recomputes_current_from_observed_voltage(self) -> None:
-        packet = make_constant_resistance_discharge_packet(
+        packet = build_constant_resistance_packet(
+            CONSTANT_RESISTANCE_DISCHARGE,
             resistance_ohms=10,
             observed_voltage_volts=12,
             cutoff_volts=10.5,
@@ -197,19 +216,25 @@ class OperatingModeValidationTests(unittest.TestCase):
 
     def test_builder_rejects_unsupported_phase_and_unsafe_parameters(self) -> None:
         with self.assertRaisesRegex(ProtocolError, "no adjust"):
-            make_nimh_charge_packet(
+            build_cell_charge_packet(
+                NIMH_CHARGE,
                 current_amps=0.5,
                 cells=4,
                 timeout_minutes=60,
                 phase=EbcModePhase.ADJUST,
             )
         invalid_calls = (
-            lambda: make_nimh_charge_packet(current_amps=0.5, cells=0, timeout_minutes=60),
-            lambda: make_nimh_charge_packet(current_amps=0.5, cells=True, timeout_minutes=60),
-            lambda: make_constant_power_discharge_packet(
-                power_watts=121, cutoff_volts=10.5, timeout_minutes=60
+            lambda: build_cell_charge_packet(
+                NIMH_CHARGE, current_amps=0.5, cells=0, timeout_minutes=60
             ),
-            lambda: make_constant_resistance_discharge_packet(
+            lambda: build_cell_charge_packet(
+                NIMH_CHARGE, current_amps=0.5, cells=True, timeout_minutes=60
+            ),
+            lambda: build_discharge_packet(
+                CONSTANT_POWER_DISCHARGE, value=121, cutoff_volts=10.5, timeout_minutes=60
+            ),
+            lambda: build_constant_resistance_packet(
+                CONSTANT_RESISTANCE_DISCHARGE,
                 resistance_ohms=0,
                 observed_voltage_volts=12,
                 cutoff_volts=10.5,
@@ -230,12 +255,6 @@ class OperatingModeValidationTests(unittest.TestCase):
                 cont_opcode=2,
                 value=EbcModeValue.CURRENT,
             )
-
-    def test_source_mode_builders_never_mark_packets_as_live_control(self) -> None:
-        # Constructing a packet is intentionally independent from the live
-        # device gate.  The metadata remains the caller's safety check.
-        self.assertFalse(CONSTANT_POWER_DISCHARGE.is_control_ready_for(EBC_A10H_MODEL_ID))
-        self.assertFalse(CONSTANT_RESISTANCE_DISCHARGE.is_control_ready_for(EBC_A10H_MODEL_ID))
 
 
 if __name__ == "__main__":

@@ -141,7 +141,7 @@ def summarize_replay_log(log: ReplayLog) -> SessionReport:
         accounting.add(sample.status, elapsed)
 
     measurement = accounting.summary
-    explicit_elapsed = tuple(
+    explicit_elapsed = (
         sample.elapsed_seconds
         for sample in measurement_samples
         if sample.elapsed_seconds is not None

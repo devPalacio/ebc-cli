@@ -13,6 +13,7 @@ from typing import Protocol, Self
 
 from .device import DeviceError
 from .measurement import MeasurementAccumulator, MeasurementSummary
+from .modes import EbcModeCommand
 from .profiles import BulkToFloatProfile
 from .protocol import EbcCompletionReason, EbcStatus
 
@@ -20,9 +21,13 @@ from .protocol import EbcCompletionReason, EbcStatus
 class Tester(Protocol):
     """The device operations required by a supervised session."""
 
-    def next_status(self) -> EbcStatus: ...
+    def begin_mode(self, command: EbcModeCommand) -> EbcStatus: ...
 
-    def status(self) -> EbcStatus: ...
+    def adjust_mode(self, command: EbcModeCommand) -> None: ...
+
+    def next_status(self, *, timeout: float | None = None, latest: bool = False) -> EbcStatus: ...
+
+    def status(self, *, timeout: float | None = None, latest: bool = False) -> EbcStatus: ...
 
     def stop(self) -> None: ...
 
@@ -48,6 +53,8 @@ class SessionStopReason(StrEnum):
     BULK_TIMEOUT = "bulk-timeout"
     FLOAT_TIMEOUT = "float-timeout"
     DEVICE_CUTOFF = "device-cutoff"
+    MODE_AUTO_OFF = "mode-auto-off"
+    ZERO_CURRENT = "zero-current"
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,21 +121,23 @@ class SupervisedSession:
         return self
 
     def __exit__(self, exc_type: object, _exc: object, _traceback: object) -> None:
-        if self._active:
-            if exc_type is None:
-                event = "session-stop-sent"
-            elif isinstance(exc_type, type) and issubclass(exc_type, _SessionSignal):
-                event = "signal-stop-sent"
-            elif isinstance(exc_type, type) and issubclass(exc_type, KeyboardInterrupt):
-                event = "operator-interrupt-stop-sent"
-            else:
-                event = "error-stop-sent"
-            self.stop(event)
-        for signum, handler in self._old_handlers.items():
-            try:
-                signal.signal(signum, handler)
-            except OSError, ValueError:
-                continue
+        try:
+            if self._active:
+                if exc_type is None:
+                    event = "session-stop-sent"
+                elif isinstance(exc_type, type) and issubclass(exc_type, _SessionSignal):
+                    event = "signal-stop-sent"
+                elif isinstance(exc_type, type) and issubclass(exc_type, KeyboardInterrupt):
+                    event = "operator-interrupt-stop-sent"
+                else:
+                    event = "error-stop-sent"
+                self.stop(event)
+        finally:
+            for signum, handler in self._old_handlers.items():
+                try:
+                    signal.signal(signum, handler)
+                except OSError, ValueError:
+                    continue
 
     def mark_started(self, event: str) -> None:
         """Mark the operation live after its start frame has been sent."""
@@ -163,33 +172,55 @@ class SupervisedSession:
             raise _SessionSignal(signum)
 
 
-def read_live_status(tester: Tester) -> EbcStatus:
-    """Read a status update, falling back to an explicit poll if needed."""
+class _ReadDeadlineReached(Exception):
+    """The session deadline expired while waiting for an observation."""
+
+
+def read_live_status(
+    tester: Tester,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> EbcStatus:
+    """Read the latest observation, sharing a deadline with the fallback poll."""
+
+    def remaining() -> float | None:
+        if deadline is None:
+            return None
+        seconds = deadline - clock()
+        if seconds <= 0:
+            raise _ReadDeadlineReached
+        return seconds
 
     try:
-        return tester.next_status()
+        return tester.next_status(timeout=remaining(), latest=True)
     except DeviceError:
-        # Some firmware revisions only emit status after CONNECT. Keeping the
-        # fallback here lets a supervised session log both variants while a
-        # second failure is surfaced to the lifecycle guard.
-        return tester.status()
+        # Poll-only firmware needs CONNECT. Recompute the budget so a failed
+        # streamed read cannot give the fallback another full session timeout.
+        try:
+            return tester.status(timeout=remaining(), latest=True)
+        except DeviceError:
+            remaining()
+            raise
 
 
 def run_active_session(
     *,
     session: SupervisedSession,
-    tester: Tester,
-    logger: StatusLogger | None,
     printer: Callable[[EbcStatus], None],
     timeout_minutes: int,
     sample_event: str,
     stop_on_cutoff: bool = False,
+    completion: Callable[[EbcStatus, int], SessionStopReason | None] | None = None,
+    on_sample: Callable[[EbcStatus, int], None] | None = None,
     poll_interval: float = 1.0,
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> SessionResult:
     """Log live status until cutoff or timeout, stopping the tester on exit."""
 
+    tester = session.tester
+    logger = session.logger
     session_started = clock()
     deadline = session_started + timeout_minutes * 60
     samples = 0
@@ -208,7 +239,12 @@ def run_active_session(
                 accounting=accounting,
             )
 
-        status = read_live_status(tester)
+        try:
+            status = read_live_status(tester, deadline=deadline, clock=clock)
+        except _ReadDeadlineReached:
+            continue
+        if clock() >= deadline:
+            continue
         final_status = status
         sample_elapsed = clock() - session_started
         accounting.add(status, sample_elapsed)
@@ -221,19 +257,28 @@ def run_active_session(
             )
         samples += 1
 
-        # This signal is meaningful for capacity tests; charge modes remain
-        # bounded by their configured timeout because completion codes vary.
-        if stop_on_cutoff and status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF:
+        # This signal is meaningful for capacity tests; generic mode sessions
+        # can supply their own source auto-off and zero-current policy.
+        if completion is not None:
+            completion_reason = completion(status, samples)
+        elif stop_on_cutoff and status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF:
+            completion_reason = SessionStopReason.DEVICE_CUTOFF
+        else:
+            completion_reason = None
+        if completion_reason is not None:
             return _finish_session(
                 session=session,
-                stop_event="device-cutoff-stop-sent",
-                stop_reason=SessionStopReason.DEVICE_CUTOFF,
+                stop_event=f"{completion_reason.value}-stop-sent",
+                stop_reason=completion_reason,
                 samples=samples,
                 session_started=session_started,
                 clock=clock,
                 final_status=final_status,
                 accounting=accounting,
             )
+
+        if on_sample is not None:
+            on_sample(status, samples)
 
         remaining = deadline - clock()
         if remaining <= 0:
@@ -274,8 +319,6 @@ def _finish_session(
 def run_bulk_to_float_session(
     *,
     session: SupervisedSession,
-    tester: Tester,
-    logger: StatusLogger | None,
     printer: Callable[[EbcStatus], None],
     profile: BulkToFloatProfile,
     on_float_start: Callable[[EbcStatus], None] | None = None,
@@ -290,10 +333,13 @@ def run_bulk_to_float_session(
     tester is stopped and the float phase is never started.
     """
 
+    tester = session.tester
+    logger = session.logger
     session_started = clock()
     phase = "bulk"
     phase_deadline = session_started + profile.bulk_timeout_minutes * 60
     samples = 0
+    bulk_activity_seen = False
     final_status: EbcStatus | None = None
     accounting = MeasurementAccumulator()
     while True:
@@ -316,7 +362,12 @@ def run_bulk_to_float_session(
                 accounting=accounting,
             )
 
-        status = read_live_status(tester)
+        try:
+            status = read_live_status(tester, deadline=phase_deadline, clock=clock)
+        except _ReadDeadlineReached:
+            continue
+        if clock() >= phase_deadline:
+            continue
         final_status = status
         sample_elapsed = clock() - session_started
         accounting.add(status, sample_elapsed)
@@ -326,8 +377,18 @@ def run_bulk_to_float_session(
             logger.write(status, event=event, session_elapsed_seconds=sample_elapsed)
         samples += 1
 
-        if phase == "bulk" and status.completion_reason is EbcCompletionReason.LEAD_ACID_AUTO_OFF:
-            float_baseline = profile.start_float(tester)
+        # A completion code alone cannot prove that the newly started bulk
+        # phase ran: firmware may briefly repeat its preceding operation.
+        if phase == "bulk" and status.completion_reason is None and status.current_amps > 0:
+            bulk_activity_seen = True
+        if clock() >= phase_deadline:
+            continue
+        if (
+            phase == "bulk"
+            and bulk_activity_seen
+            and status.completion_reason is EbcCompletionReason.LEAD_ACID_AUTO_OFF
+        ):
+            float_baseline = tester.begin_mode(profile.float_start_command)
             final_status = float_baseline
             if logger is not None:
                 logger.write(
@@ -361,7 +422,7 @@ def run_monitor_session(
 
     samples = 0
     while True:
-        status = tester.status()
+        status = tester.status(latest=True) if samples == 0 else read_live_status(tester)
         printer(status)
         if logger is not None:
             logger.write(status)

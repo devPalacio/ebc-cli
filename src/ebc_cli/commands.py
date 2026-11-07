@@ -5,18 +5,22 @@
 """Command handlers for the ebc CLI."""
 
 import argparse
+import math
+import sys
 from pathlib import Path
 
+from .capabilities import A10H_CAPABILITIES
+from .csvlog import StatusCsvLogger
 from .device import DeviceError
+from .diagnostics import diagnose_device
 from .modes import (
+    LEAD_ACID_CHARGE,
     SOURCE_OPERATING_MODES,
+    EbcModeCommand,
     EbcModeKind,
     EbcModePhase,
     EbcOperatingMode,
-    build_cccv_charge_packet,
-    build_cell_charge_packet,
-    build_constant_resistance_packet,
-    build_discharge_packet,
+    build_mode_packet,
     get_operating_mode,
 )
 from .profiles import (
@@ -27,15 +31,15 @@ from .profiles import (
     make_float_charge_profile,
     make_recovery_profile,
 )
-from .protocol import EbcStatus, ProtocolError, make_lead_acid_charge_plan
+from .protocol import EbcStatus, ProtocolError
 from .report import format_report, load_replay_log, summarize_replay_log
-from .resources import command_resources
+from .resources import command_resources, reserve_log_path
+from .runner import run_bulk_to_float, run_profile
 from .session import (
     SessionResult,
     SessionStopReason,
     SupervisedSession,
     run_active_session,
-    run_bulk_to_float_session,
     run_monitor_session,
 )
 
@@ -44,6 +48,7 @@ def execute_command(args: argparse.Namespace) -> int:
     """Execute one parsed command and return its process exit code."""
 
     handlers = {
+        "doctor": handle_doctor,
         "plan-lead-acid-charge": handle_plan_lead_acid_charge,
         "recover-lead-acid": handle_recover_lead_acid,
         "float-charge": handle_float_charge,
@@ -55,16 +60,27 @@ def execute_command(args: argparse.Namespace) -> int:
         "modes": handle_list_modes,
         "list-modes": handle_list_modes,
         "plan-mode": handle_plan_mode,
+        "run-mode": handle_run_mode,
         "report": handle_report,
     }
     return handlers[args.command](args)
 
 
+def handle_doctor(args: argparse.Namespace) -> int:
+    report, ready = diagnose_device(args.device)
+    print(report)
+    return 0 if ready else 2
+
+
 def handle_plan_lead_acid_charge(args: argparse.Namespace) -> int:
-    packet = make_lead_acid_charge_plan(
-        current_amps=args.current,
-        cells=args.cells,
-        timeout_minutes=args.timeout_minutes,
+    packet = build_mode_packet(
+        EbcModeCommand(
+            LEAD_ACID_CHARGE,
+            current_amps=args.current,
+            cells=args.cells,
+            timeout_minutes=args.timeout_minutes,
+        ),
+        capabilities=A10H_CAPABILITIES,
     )
     voltage = args.cells * 2.4
     print("PLAN ONLY — no command was sent to the tester")
@@ -128,27 +144,23 @@ def _run_profile(
     show_baseline: bool = True,
 ) -> int:
     with _open_resources(args) as resources:
-        baseline = profile.start(resources.tester)
-        if resources.logger is not None:
-            resources.logger.write(baseline, event=f"{profile.kind.value}-baseline")
-        with SupervisedSession(resources.tester, resources.logger) as session:
-            session.mark_started(profile.start_event)
+
+        def on_baseline(baseline: EbcStatus) -> None:
             print(profile.summary, flush=profile.kind.value == "capacity-test")
             if show_baseline:
                 print("Baseline: ", end="")
                 print_status(baseline)
             if report_log_before_sampling:
                 _report_log(resources.log_path)
-            result = run_active_session(
-                session=session,
-                tester=resources.tester,
-                logger=resources.logger,
-                printer=print_status,
-                timeout_minutes=profile.timeout_minutes,
-                sample_event=profile.sample_event,
-                stop_on_cutoff=profile.stop_on_cutoff,
-            )
-            _report_session_result(result)
+
+        run = run_profile(
+            resources.tester,
+            profile,
+            logger=resources.logger,
+            on_baseline=on_baseline,
+            on_sample=print_status,
+        )
+        _report_session_result(run.result)
     if not report_log_before_sampling:
         _report_log(resources.log_path)
     return 0
@@ -156,34 +168,37 @@ def _run_profile(
 
 def _run_bulk_to_float_profile(args: argparse.Namespace, profile: BulkToFloatProfile) -> int:
     with _open_resources(args) as resources:
-        baseline = profile.start_bulk(resources.tester)
-        if resources.logger is not None:
-            resources.logger.write(baseline, event=profile.bulk_baseline_event)
-        with SupervisedSession(resources.tester, resources.logger) as session:
-            session.mark_started(profile.start_event)
+
+        def on_baseline(baseline: EbcStatus) -> None:
             print(profile.summary, flush=True)
             print("Bulk baseline: ", end="")
             print_status(baseline)
-            result = run_bulk_to_float_session(
-                session=session,
-                tester=resources.tester,
-                logger=resources.logger,
-                printer=print_status,
-                profile=profile,
-                on_float_start=_print_float_start,
-            )
-            _report_session_result(result)
+
+        run = run_bulk_to_float(
+            resources.tester,
+            profile,
+            logger=resources.logger,
+            on_baseline=on_baseline,
+            on_sample=print_status,
+            on_float_start=_print_float_start,
+        )
+        _report_session_result(run.result)
     _report_log(resources.log_path)
     return 0
 
 
-def _open_resources(args: argparse.Namespace, *, lock_device: bool = True):
+def _open_resources(
+    args: argparse.Namespace,
+    *,
+    lock_device: bool = True,
+    no_log: bool | None = None,
+):
     return command_resources(
         device=args.device,
         timeout=args.timeout,
         command=args.command,
         log_dir=args.log_dir,
-        no_log=args.no_log,
+        no_log=args.no_log if no_log is None else no_log,
         lock_device=lock_device,
     )
 
@@ -201,6 +216,8 @@ def _report_session_result(result: SessionResult) -> None:
         ),
         SessionStopReason.FLOAT_TIMEOUT: "Float hold timeout reached; stop frame sent.",
         SessionStopReason.DEVICE_CUTOFF: "Device cutoff reached; stop frame sent.",
+        SessionStopReason.MODE_AUTO_OFF: "Device mode auto-off reached; stop frame sent.",
+        SessionStopReason.ZERO_CURRENT: "Device current reached zero; stop frame sent.",
     }
     print(stop_messages[result.stop_reason], flush=True)
     print(
@@ -227,18 +244,28 @@ def _report_session_result(result: SessionResult) -> None:
 def handle_stop(args: argparse.Namespace) -> int:
     if not args.execute:
         raise DeviceError("stop requires --execute")
-    with _open_resources(args, lock_device=False) as resources:
+    # STOP must remain available even when the requested log directory is
+    # unavailable. Open only the unlogged emergency scope until the frame has
+    # been sent, then make a best-effort log record independently.
+    with _open_resources(args, lock_device=False, no_log=True) as resources:
         resources.tester.stop()
-        if resources.logger is not None:
-            resources.logger.write_event("stop-sent")
     print("Stop frame sent.")
-    _report_log(resources.log_path)
+    if args.no_log:
+        return 0
+    try:
+        log_path = reserve_log_path(args.command, args.log_dir)
+        with StatusCsvLogger(log_path) as logger:
+            logger.write_event("stop-sent")
+    except Exception as exc:  # noqa: BLE001 - STOP success must survive any logger failure.
+        print(f"Stop frame sent, but logging failed: {exc}", file=sys.stderr)
+    else:
+        _report_log(log_path)
     return 0
 
 
 def handle_status(args: argparse.Namespace) -> int:
     with _open_resources(args) as resources:
-        status = resources.tester.status()
+        status = resources.tester.fresh_status()
         print_status(status)
         if resources.logger is not None:
             resources.logger.write(status)
@@ -247,8 +274,8 @@ def handle_status(args: argparse.Namespace) -> int:
 
 
 def handle_monitor(args: argparse.Namespace) -> int:
-    if args.interval <= 0:
-        raise DeviceError("interval must be greater than zero")
+    if not math.isfinite(args.interval) or args.interval <= 0:
+        raise DeviceError("interval must be finite and greater than zero")
     if args.count is not None and args.count <= 0:
         raise DeviceError("count must be greater than zero")
     with _open_resources(args) as resources:
@@ -312,63 +339,127 @@ def _test_value_label(test_value: str) -> str:
 def handle_plan_mode(args: argparse.Namespace) -> int:
     """Build one source-defined mode packet without opening the tester."""
 
+    command = _mode_command_from_args(args, phase=EbcModePhase(args.phase), require_observed=True)
+    packet = build_mode_packet(command)
+
+    print("PLAN ONLY — no command was sent to the tester")
+    print(f"Mode: {command.mode.command} ({command.mode.name}), phase={command.phase.value}")
+    print(f"Frame: {packet.hex().upper()}")
+    return 0
+
+
+def handle_run_mode(args: argparse.Namespace) -> int:
+    """Run one source-defined tester mode under the host safety lifecycle."""
+
+    _require_supervised_execution(args, f"{args.mode} mode")
+    command = _mode_command_from_args(args, phase=EbcModePhase.START, require_observed=False)
+    command.validate_live(A10H_CAPABILITIES)
+    return _run_mode(args, command)
+
+
+def _mode_command_from_args(
+    args: argparse.Namespace,
+    *,
+    phase: EbcModePhase,
+    require_observed: bool,
+) -> EbcModeCommand:
     mode = get_operating_mode(args.mode)
     if mode is None:
         raise ProtocolError(f"unknown source operating mode: {args.mode!r}")
     if mode.kind is EbcModeKind.PROGRAM_CONTROL:
         raise ProtocolError(f"{mode.command} is host program control and has no serial packet")
+    accepted = {
+        EbcModeKind.CELL_CHARGE: {"current", "cells"},
+        EbcModeKind.CCCV_CHARGE: {"current", "voltage"},
+        EbcModeKind.CONSTANT_CURRENT_DISCHARGE: {"current", "cutoff_voltage"},
+        EbcModeKind.CONSTANT_POWER_DISCHARGE: {"power", "cutoff_voltage"},
+        EbcModeKind.SOFTWARE_CONSTANT_RESISTANCE: {
+            "resistance",
+            "cutoff_voltage",
+            "observed_voltage",
+        },
+    }[mode.kind]
+    for name in (
+        "current",
+        "cells",
+        "voltage",
+        "cutoff_voltage",
+        "power",
+        "resistance",
+        "observed_voltage",
+    ):
+        if getattr(args, name, None) is not None and name not in accepted:
+            raise ProtocolError(f"{mode.command} does not accept --{name.replace('_', '-')}")
+    observed_voltage = getattr(args, "observed_voltage", None)
+    if require_observed and mode.kind is EbcModeKind.SOFTWARE_CONSTANT_RESISTANCE:
+        observed_voltage = _required_mode_arg(
+            args.observed_voltage, "--observed-voltage", mode.command
+        )
+    return EbcModeCommand(
+        mode=mode,
+        timeout_minutes=args.timeout_minutes,
+        current_amps=args.current,
+        cells=args.cells,
+        voltage_volts=args.voltage,
+        cutoff_volts=args.cutoff_voltage,
+        power_watts=args.power,
+        resistance_ohms=args.resistance,
+        observed_voltage_volts=observed_voltage,
+        phase=phase,
+    )
 
-    phase = EbcModePhase(args.phase)
-    if mode.kind is EbcModeKind.CELL_CHARGE:
-        packet = build_cell_charge_packet(
-            mode,
-            current_amps=_required_mode_arg(args.current, "--current", mode.command),
-            cells=_required_mode_arg(args.cells, "--cells", mode.command),
-            timeout_minutes=args.timeout_minutes,
-            phase=phase,
-        )
-    elif mode.kind is EbcModeKind.CCCV_CHARGE:
-        packet = build_cccv_charge_packet(
-            mode,
-            current_amps=_required_mode_arg(args.current, "--current", mode.command),
-            voltage_volts=_required_mode_arg(args.voltage, "--voltage", mode.command),
-            timeout_minutes=args.timeout_minutes,
-            phase=phase,
-        )
-    elif mode.kind is EbcModeKind.SOFTWARE_CONSTANT_RESISTANCE:
-        packet = build_constant_resistance_packet(
-            mode,
-            resistance_ohms=_required_mode_arg(args.resistance, "--resistance", mode.command),
-            observed_voltage_volts=_required_mode_arg(
-                args.observed_voltage, "--observed-voltage", mode.command
-            ),
-            cutoff_volts=_required_mode_arg(args.cutoff_voltage, "--cutoff-voltage", mode.command),
-            timeout_minutes=args.timeout_minutes,
-            phase=phase,
-        )
-    elif mode.kind is EbcModeKind.CONSTANT_POWER_DISCHARGE:
-        packet = build_discharge_packet(
-            mode,
-            value=_required_mode_arg(args.power, "--power", mode.command),
-            cutoff_volts=_required_mode_arg(args.cutoff_voltage, "--cutoff-voltage", mode.command),
-            timeout_minutes=args.timeout_minutes,
-            phase=phase,
-        )
-    elif mode.kind is EbcModeKind.CONSTANT_CURRENT_DISCHARGE:
-        packet = build_discharge_packet(
-            mode,
-            value=_required_mode_arg(args.current, "--current", mode.command),
-            cutoff_volts=_required_mode_arg(args.cutoff_voltage, "--cutoff-voltage", mode.command),
-            timeout_minutes=args.timeout_minutes,
-            phase=phase,
-        )
-    else:  # pragma: no cover - the enum is exhaustive after the control check
-        raise ProtocolError(f"mode {mode.command} has no plan builder")
 
-    print("PLAN ONLY — no command was sent to the tester")
-    print(f"Mode: {mode.command} ({mode.name}), phase={phase.value}")
-    print(f"Frame: {packet.hex().upper()}")
+def _run_mode(args: argparse.Namespace, command: EbcModeCommand) -> int:
+    mode = command.mode
+    with (
+        _open_resources(args) as resources,
+        SupervisedSession(resources.tester, resources.logger) as session,
+    ):
+        baseline = resources.tester.begin_mode(command)
+        session.mark_started(f"{mode.command}-started")
+        if resources.logger is not None:
+            resources.logger.write(baseline, event=f"{mode.command}-baseline")
+        print(
+            f"{mode.command} started: {mode.name}, timeout {command.timeout_minutes} minutes",
+            flush=True,
+        )
+        print("Baseline: ", end="")
+        print_status(baseline)
+        result = run_active_session(
+            session=session,
+            printer=print_status,
+            timeout_minutes=command.timeout_minutes,
+            sample_event=f"{mode.command}-sample",
+            completion=_mode_completion(mode),
+            on_sample=_mode_sample_action(resources.tester, command),
+        )
+        _report_session_result(result)
+    _report_log(resources.log_path)
     return 0
+
+
+def _mode_completion(mode: EbcOperatingMode):
+    def completion(status: EbcStatus, samples: int) -> SessionStopReason | None:
+        if mode.auto_off_code is not None and status.state_byte == mode.auto_off_code:
+            return SessionStopReason.MODE_AUTO_OFF
+        if samples > 3 and status.current_amps < 0.0001:
+            return SessionStopReason.ZERO_CURRENT
+        return None
+
+    return completion
+
+
+def _mode_sample_action(tester, command: EbcModeCommand):
+    if command.mode.kind is not EbcModeKind.SOFTWARE_CONSTANT_RESISTANCE:
+        return None
+
+    def adjust(status: EbcStatus, samples: int) -> None:
+        if samples % 3 == 0:
+            tester.adjust_mode(
+                command.with_observed_voltage(status.voltage_volts, phase=EbcModePhase.ADJUST)
+            )
+
+    return adjust
 
 
 def _required_mode_arg(value: object, flag: str, mode_command: str):
@@ -385,10 +476,12 @@ def _report_log(path: Path | None) -> None:
 def print_status(status: EbcStatus) -> None:
     """Render one status line for the terminal."""
 
+    state = "unknown" if status.state_byte is None else f"0x{status.state_byte:02X}"
     print(
         f"{status.model_name}: {status.voltage_volts:.3f} V  "
         f"{status.current_amps:.3f} A  {status.power_watts:.3f} W  "
-        f"{status.capacity_ah:.3f} Ah  device timer {status.device_timer_minutes} min",
+        f"{status.capacity_ah:.3f} Ah  state {state}  "
+        f"device timer {status.device_timer_minutes} min",
         flush=True,
     )
 

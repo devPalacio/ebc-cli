@@ -4,17 +4,19 @@
 
 """Source-compatible framing and measurement conversion for EBC testers.
 
-The EBC-controller Lazarus source uses a nine-byte command frame and a
+The EBC-controller Lazarus source uses a ten-byte command frame and a
 nineteen-byte status frame. Checksums are XORs over the bytes after the frame
 prefix, excluding the checksum byte itself.
 """
 
 import math
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from functools import reduce
 from operator import xor
+
+from .capabilities import A10H_CAPABILITIES, EbcCapabilities
 
 COMMAND_LENGTH = 10
 STATUS_LENGTH = 19
@@ -26,9 +28,6 @@ COMMAND_CHECKSUM_INDEX = 8
 CONNECT = bytes.fromhex("FA0500000000000005F8")
 DISCONNECT = bytes.fromhex("FA0600000000000006F8")
 STOP = bytes.fromhex("FA0200000000000002F8")
-PB_AC_START = bytes.fromhex("FA6100000000000000F8")
-CCCV_START = bytes.fromhex("FA7100000000000000F8")
-CC_DISCHARGE_START = bytes.fromhex("FA0100000000000000F8")
 
 EBC_A05_MODEL_ID = 0x05
 EBC_A10H_MODEL_ID = 0x06
@@ -49,14 +48,6 @@ _COMPLETION_REASONS = {
 
 class ProtocolError(ValueError):
     """The tester sent an incomplete or invalid protocol frame."""
-
-
-class EbcProfile(StrEnum):
-    """Profile packet families understood by a registered tester model."""
-
-    LEAD_ACID_CHARGE = "lead-acid-charge"
-    CCCV_CHARGE = "cccv-charge"
-    CONSTANT_CURRENT_DISCHARGE = "constant-current-discharge"
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +93,7 @@ class EbcModel:
     stop_packet: bytes = STOP
     disconnect_packet: bytes = DISCONNECT
     supports_control: bool = False
-    profile_builders: Mapping[EbcProfile, Callable[..., bytes]] = field(default_factory=dict)
+    capabilities: EbcCapabilities | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.model_id, bool) or not isinstance(self.model_id, int):
@@ -139,22 +130,10 @@ class EbcModel:
                 raise ValueError(f"{label} must start with FA and end with F8")
             if packet[COMMAND_CHECKSUM_INDEX] != checksum(packet, COMMAND_CHECKSUM_INDEX):
                 raise ValueError(f"{label} has an invalid checksum")
-        if self.supports_control and not self.profile_builders:
-            raise ValueError("a controllable model must provide profile builders")
-
-    def build_profile(self, profile: EbcProfile | str, **kwargs: object) -> bytes:
-        """Build a packet using this model's registered profile behavior."""
-
-        try:
-            profile_kind = EbcProfile(profile)
-        except ValueError as exc:
-            raise ProtocolError(f"unsupported profile: {profile!r}") from exc
-        if not self.supports_control:
-            raise ProtocolError(f"model {self.name} does not support control profiles")
-        builder = self.profile_builders.get(profile_kind)
-        if builder is None:
-            raise ProtocolError(f"model {self.name} has no {profile_kind.value} packet builder")
-        return builder(**kwargs)
+        if self.capabilities is not None and not isinstance(self.capabilities, EbcCapabilities):
+            raise TypeError("capabilities must be an EbcCapabilities instance or None")
+        if self.supports_control and self.capabilities is None:
+            raise ValueError("a controllable model must provide capabilities")
 
 
 def checksum(frame: bytes, checksum_index: int) -> int:
@@ -202,7 +181,7 @@ def encode_scaled(value: float, factor: float = 1.0) -> bytes:
         raise ProtocolError("value and factor must be finite")
     if numeric_value < 0 or numeric_factor <= 0:
         raise ProtocolError("value must be non-negative and factor must be positive")
-    encoded = int(numeric_value * numeric_factor * 1000)
+    encoded = int(Decimal(str(numeric_value)) * Decimal(str(numeric_factor)) * 1000)
     high, remainder = divmod(encoded, 2400)
     low = remainder // 10
     if high > 0xFF or low > 0xFF:
@@ -236,7 +215,7 @@ def encode_timer(minutes: int) -> bytes:
 
     if isinstance(minutes, bool) or not isinstance(minutes, int):
         raise ProtocolError("timer must be an integer number of minutes")
-    if not 0 <= minutes <= (0xFF * 240 + 0xFF):
+    if not 0 <= minutes < 256 * 240:
         raise ProtocolError("timer is outside the EBC range")
     if minutes == 250:
         # The EBC-controller source treats 250 as a firmware-reserved value.
@@ -249,49 +228,6 @@ def decode_timer(data: bytes) -> int:
 
     _validate_two_bytes(data, 1.0)
     return data[0] * 240 + data[1]
-
-
-def make_lead_acid_charge_plan(
-    *, current_amps: float, cells: int = 6, timeout_minutes: int = 720
-) -> bytes:
-    """Build, but do not transmit, the PbAc start frame.
-
-    The EBC's dedicated PbAc firmware mode takes a cell count rather than an
-    arbitrary voltage. The upstream configuration defines its target as
-    `cells * 2.4 V`; six cells is therefore 14.4 V.
-    """
-
-    if not 1 <= cells <= 0xFF:
-        raise ProtocolError("cell count must fit in one byte")
-    result = bytearray(PB_AC_START)
-    result[2:4] = encode_scaled(current_amps)
-    result[4:6] = bytes((0, cells))
-    result[6:8] = encode_timer(timeout_minutes)
-    return finalize_command(result)
-
-
-def make_cccv_charge_plan(
-    *, current_amps: float, voltage_volts: float, timeout_minutes: int
-) -> bytes:
-    """Build a constant-current/constant-voltage charge start frame."""
-
-    result = bytearray(CCCV_START)
-    result[2:4] = encode_scaled(current_amps)
-    result[4:6] = encode_scaled(voltage_volts)
-    result[6:8] = encode_timer(timeout_minutes)
-    return finalize_command(result)
-
-
-def make_constant_current_discharge_plan(
-    *, current_amps: float, cutoff_volts: float, timeout_minutes: int
-) -> bytes:
-    """Build a constant-current discharge start frame."""
-
-    result = bytearray(CC_DISCHARGE_START)
-    result[2:4] = encode_scaled(current_amps)
-    result[4:6] = encode_scaled(cutoff_volts)
-    result[6:8] = encode_timer(timeout_minutes)
-    return finalize_command(result)
 
 
 # EBC-controller's ``ebcc.init`` identifies the A05 as 0x05 with a tenfold
@@ -308,6 +244,7 @@ A05_MODEL = EbcModel(
     serial=EbcSerialSettings(baudrate=9600, data_bits=8, parity="even", stop_bits=1),
     current_factor=10.0,
     voltage_factor=1.0,
+    capabilities=None,
     connect_packet=CONNECT,
     stop_packet=STOP,
     disconnect_packet=DISCONNECT,
@@ -320,22 +257,17 @@ A10H_MODEL = EbcModel(
     serial=EbcSerialSettings(baudrate=9600, data_bits=8, parity="even", stop_bits=1),
     current_factor=1.0,
     voltage_factor=1.0,
+    capabilities=A10H_CAPABILITIES,
     connect_packet=CONNECT,
     stop_packet=STOP,
     disconnect_packet=DISCONNECT,
     supports_control=True,
-    profile_builders={
-        EbcProfile.LEAD_ACID_CHARGE: make_lead_acid_charge_plan,
-        EbcProfile.CCCV_CHARGE: make_cccv_charge_plan,
-        EbcProfile.CONSTANT_CURRENT_DISCHARGE: make_constant_current_discharge_plan,
-    },
 )
 
 MODEL_REGISTRY: dict[int, EbcModel] = {
     A05_MODEL.model_id: A05_MODEL,
     A10H_MODEL.model_id: A10H_MODEL,
 }
-MODEL_NAMES: dict[int, str] = {model_id: model.name for model_id, model in MODEL_REGISTRY.items()}
 
 
 def get_model(model_id: int) -> EbcModel | None:
@@ -350,7 +282,6 @@ def register_model(model: EbcModel, *, replace: bool = False) -> None:
     if model.model_id in MODEL_REGISTRY and not replace:
         raise ProtocolError(f"model ID 0x{model.model_id:02X} is already registered")
     MODEL_REGISTRY[model.model_id] = model
-    MODEL_NAMES[model.model_id] = model.name
 
 
 @dataclass(frozen=True)
@@ -381,16 +312,35 @@ class EbcStatus:
         return model.name if model is not None else f"unknown (0x{self.model_id:02X})"
 
     @property
+    def state_byte(self) -> int | None:
+        """Return the raw tester state byte when the frame contains one."""
+
+        return self.raw[1] if len(self.raw) > 1 else None
+
+    @property
     def completion_reason(self) -> EbcCompletionReason | None:
         """Return a known completion reason encoded by the status state byte."""
 
-        if len(self.raw) <= 1:
+        if self.state_byte is None:
             return None
-        return _COMPLETION_REASONS.get(self.raw[1])
+        return _COMPLETION_REASONS.get(self.state_byte)
 
     @property
     def power_watts(self) -> float:
         return self.voltage_volts * self.current_amps
+
+
+def _validate_status_frame(frame: bytes) -> None:
+    if len(frame) != STATUS_LENGTH:
+        raise ProtocolError(f"status must be {STATUS_LENGTH} bytes, got {len(frame)}")
+    if frame[0] != FRAME_PREFIX:
+        raise ProtocolError("status frame does not start with FA")
+    if frame[-1] != FRAME_SUFFIX:
+        raise ProtocolError("status frame does not end with F8")
+    expected = checksum(frame, STATUS_CHECKSUM_INDEX)
+    actual = frame[STATUS_CHECKSUM_INDEX]
+    if actual != expected:
+        raise ProtocolError(f"bad status checksum: expected 0x{expected:02X}, got 0x{actual:02X}")
 
 
 def parse_status(
@@ -403,16 +353,7 @@ def parse_status(
     callers must still explicitly validate a model before sending controls.
     """
 
-    if len(frame) != STATUS_LENGTH:
-        raise ProtocolError(f"status must be {STATUS_LENGTH} bytes, got {len(frame)}")
-    if frame[0] != FRAME_PREFIX:
-        raise ProtocolError("status frame does not start with FA")
-    if frame[-1] != FRAME_SUFFIX:
-        raise ProtocolError("status frame does not end with F8")
-    expected = checksum(frame, STATUS_CHECKSUM_INDEX)
-    actual = frame[STATUS_CHECKSUM_INDEX]
-    if actual != expected:
-        raise ProtocolError(f"bad status checksum: expected 0x{expected:02X}, got 0x{actual:02X}")
+    _validate_status_frame(frame)
     model = get_model(frame[16])
     if current_factor is None:
         current_factor = model.current_factor if model is not None else 1.0
@@ -442,7 +383,7 @@ def find_valid_status_frame(data: bytes) -> bytes | None:
             continue
         candidate = data[start : start + STATUS_LENGTH]
         try:
-            parse_status(candidate)
+            _validate_status_frame(candidate)
         except ProtocolError:
             continue
         return candidate

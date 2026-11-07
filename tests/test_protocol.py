@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from ebc_cli.capabilities import A10H_CAPABILITIES
 from ebc_cli.cli import main
 from ebc_cli.csvlog import (
     CSV_HEADER,
@@ -13,6 +14,13 @@ from ebc_cli.csvlog import (
     schema_version_from_event,
 )
 from ebc_cli.device import DeviceError, EbcDevice
+from ebc_cli.modes import (
+    CCCV_CHARGE,
+    CONSTANT_CURRENT_DISCHARGE,
+    LEAD_ACID_CHARGE,
+    EbcModeCommand,
+    build_mode_packet,
+)
 from ebc_cli.protocol import (
     CONNECT,
     FRAME_PREFIX,
@@ -28,9 +36,6 @@ from ebc_cli.protocol import (
     encode_scaled,
     encode_timer,
     find_valid_status_frame,
-    make_cccv_charge_plan,
-    make_constant_current_discharge_plan,
-    make_lead_acid_charge_plan,
     parse_status,
 )
 
@@ -103,17 +108,36 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(decode_timer(bytes((3, 0))), 720)
         self.assertEqual(encode_timer(250), bytes((1, 9)))
 
+    def test_timer_rejects_values_above_the_encodable_boundary(self) -> None:
+        self.assertEqual(encode_timer(61439), bytes((255, 239)))
+        self.assertEqual(decode_timer(encode_timer(61439)), 61439)
+        for minutes in (61440, 61455, 61456):
+            with self.subTest(minutes=minutes), self.assertRaises(ProtocolError):
+                encode_timer(minutes)
+
     def test_pb_charge_plan_is_fully_framed(self) -> None:
-        plan = make_lead_acid_charge_plan(current_amps=0.7, cells=6, timeout_minutes=720)
+        plan = build_mode_packet(
+            EbcModeCommand(LEAD_ACID_CHARGE, current_amps=0.7, cells=6, timeout_minutes=720),
+            capabilities=A10H_CAPABILITIES,
+        )
         self.assertEqual(plan.hex().upper(), "FA6100460006030022F8")
 
     def test_cccv_charge_plan_encodes_current_voltage_and_timeout(self) -> None:
-        plan = make_cccv_charge_plan(current_amps=0.5, voltage_volts=13.7, timeout_minutes=120)
+        plan = build_mode_packet(
+            EbcModeCommand(CCCV_CHARGE, current_amps=0.5, voltage_volts=13.7, timeout_minutes=120),
+            capabilities=A10H_CAPABILITIES,
+        )
         self.assertEqual(plan.hex().upper(), "FA71003205AA007894F8")
 
     def test_cc_discharge_plan_encodes_current_cutoff_and_timeout(self) -> None:
-        plan = make_constant_current_discharge_plan(
-            current_amps=0.8, cutoff_volts=10.5, timeout_minutes=1440
+        plan = build_mode_packet(
+            EbcModeCommand(
+                CONSTANT_CURRENT_DISCHARGE,
+                current_amps=0.8,
+                cutoff_volts=10.5,
+                timeout_minutes=1440,
+            ),
+            capabilities=A10H_CAPABILITIES,
         )
         self.assertEqual(plan.hex().upper(), "FA010050045A060009F8")
 
@@ -124,7 +148,18 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(status.voltage_volts, 12.0)
         self.assertEqual(status.capacity_ah, 0.1)
         self.assertEqual(status.device_timer_minutes, 720)
+        self.assertEqual(status.state_byte, 0x68)
         self.assertIsNone(status.completion_reason)
+
+    def test_live_a10h_state_variants_are_valid_and_keep_raw_state(self) -> None:
+        frames = (
+            "FA06000035AF268800000050000604270641F8",
+            "FA6A000035AF26880000013E0C630447064BF8",
+        )
+        statuses = tuple(parse_status(bytes.fromhex(frame)) for frame in frames)
+        self.assertEqual(tuple(status.state_byte for status in statuses), (0x06, 0x6A))
+        self.assertEqual(tuple(status.device_timer_minutes for status in statuses), (999, 1031))
+        self.assertTrue(all(status.completion_reason is None for status in statuses))
 
     def test_status_exposes_capacity_cutoff_reason(self) -> None:
         status = parse_status(_status_frame(state=0x14))

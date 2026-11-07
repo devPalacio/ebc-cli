@@ -1,6 +1,6 @@
 import unittest
-from unittest.mock import Mock
 
+from ebc_cli.modes import CCCV_CHARGE, LEAD_ACID_CHARGE, EbcModeCommand
 from ebc_cli.profiles import (
     ProfileError,
     make_bulk_to_float_profile,
@@ -8,6 +8,7 @@ from ebc_cli.profiles import (
     make_float_charge_profile,
     make_recovery_profile,
 )
+from ebc_cli.protocol import ProtocolError
 
 
 class ProfileTests(unittest.TestCase):
@@ -27,25 +28,24 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(capacity.sample_event, "capacity-sample")
         self.assertTrue(capacity.stop_on_cutoff)
 
-    def test_profile_start_dispatches_to_the_matching_device_operation(self) -> None:
-        tester = Mock()
-        expected_status = object()
-        tester.begin_float_charge.return_value = expected_status
+    def test_profile_exposes_a_device_neutral_start_command(self) -> None:
         profile = make_float_charge_profile(
             current_amps=0.5,
             voltage_volts=13.7,
             timeout_minutes=120,
         )
 
-        self.assertIs(profile.start(tester), expected_status)
-        tester.begin_float_charge.assert_called_once_with(
-            current_amps=0.5,
-            voltage_volts=13.7,
-            timeout_minutes=120,
+        self.assertEqual(profile.start_command.mode, CCCV_CHARGE)
+        self.assertEqual(
+            profile.start_command,
+            EbcModeCommand(CCCV_CHARGE, current_amps=0.5, voltage_volts=13.7, timeout_minutes=120),
         )
 
-    def test_bulk_to_float_profile_describes_both_stages_and_dispatches(self) -> None:
-        tester = Mock()
+    def test_start_command_requires_mode_specific_parameters(self) -> None:
+        with self.assertRaisesRegex(ProtocolError, "c_CCCV requires voltage"):
+            EbcModeCommand(CCCV_CHARGE, current_amps=0.5, timeout_minutes=10)
+
+    def test_bulk_to_float_profile_describes_both_stages_and_commands(self) -> None:
         profile = make_bulk_to_float_profile(
             bulk_current_amps=0.8,
             bulk_timeout_minutes=1440,
@@ -59,16 +59,15 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(profile.float_sample_event, "bulk-to-float-float-sample")
         self.assertIn("14.4 V target", profile.summary)
 
-        profile.start_bulk(tester)
-        profile.start_float(tester)
-        tester.begin_lead_acid_charge.assert_called_once_with(
-            current_amps=0.8,
-            timeout_minutes=1440,
+        self.assertEqual(profile.bulk_start_command.mode, LEAD_ACID_CHARGE)
+        self.assertEqual(
+            profile.bulk_start_command,
+            EbcModeCommand(LEAD_ACID_CHARGE, current_amps=0.8, cells=6, timeout_minutes=1440),
         )
-        tester.begin_float_charge.assert_called_once_with(
-            current_amps=0.5,
-            voltage_volts=13.7,
-            timeout_minutes=240,
+        self.assertEqual(profile.float_start_command.mode, CCCV_CHARGE)
+        self.assertEqual(
+            profile.float_start_command,
+            EbcModeCommand(CCCV_CHARGE, current_amps=0.5, voltage_volts=13.7, timeout_minutes=240),
         )
 
     def test_profile_factories_reject_unsafe_parameters(self) -> None:

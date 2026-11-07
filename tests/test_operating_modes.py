@@ -3,7 +3,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 
 from ebc_cli.cli import main
-from ebc_cli.commands import handle_list_modes
+from ebc_cli.commands import _mode_command_from_args, handle_list_modes
 from ebc_cli.modes import (
     LOOP_CONTROL,
     SOURCE_OPERATING_MODES,
@@ -72,17 +72,22 @@ class OperatingModeCatalogTests(unittest.TestCase):
                 start_opcode=0x01,
             )
 
-    def test_existing_live_profiles_are_marked_control_ready(self) -> None:
-        for command in ("c_Pb", "c_CCCV", "d_CC"):
+    def test_device_modes_are_marked_control_ready(self) -> None:
+        for command in (
+            "c_NiMH",
+            "c_NiCd",
+            "c_LiPo",
+            "c_LiFe",
+            "c_Pb",
+            "c_CCCV",
+            "d_CC",
+            "d_CP",
+            "d_CR",
+        ):
             mode = get_operating_mode(command)
             self.assertIsNotNone(mode)
             self.assertTrue(mode.control_ready)
             self.assertIn("0x06", mode.control_summary)
-        for command in ("c_NiMH", "c_NiCd", "c_LiPo", "c_LiFe", "d_CP", "d_CR"):
-            mode = get_operating_mode(command)
-            self.assertIsNotNone(mode)
-            self.assertFalse(mode.control_ready)
-            self.assertIn("control not enabled", mode.control_summary)
 
     def test_modes_command_and_alias_are_read_only(self) -> None:
         parser = build_parser()
@@ -97,7 +102,7 @@ class OperatingModeCatalogTests(unittest.TestCase):
         self.assertIn("c_NiMH", rendered)
         self.assertIn("d_CP", rendered)
         self.assertIn("control not enabled", rendered)
-        self.assertIn("control validated for 0x06", rendered)
+        self.assertIn("control enabled for 0x06", rendered)
         self.assertIn("No connection opened", rendered)
 
     def test_plan_mode_builds_a_read_only_chemistry_charge_packet(self) -> None:
@@ -144,6 +149,32 @@ class OperatingModeCatalogTests(unittest.TestCase):
     def test_plan_mode_rejects_program_controls_and_missing_parameters(self) -> None:
         self.assertEqual(main(["plan-mode", "Wait"]), 2)
         self.assertEqual(main(["plan-mode", "c_NiMH", "--cells", "4"]), 2)
+
+    def test_run_mode_parser_keeps_cr_voltage_for_the_live_baseline(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "run-mode",
+                "d_CR",
+                "--resistance",
+                "10",
+                "--cutoff-voltage",
+                "10.5",
+                "--execute",
+                "--i-am-present",
+            ]
+        )
+
+        command = _mode_command_from_args(
+            args,
+            phase=EbcModePhase.START,
+            require_observed=False,
+        )
+
+        self.assertEqual(command.mode.command, "d_CR")
+        self.assertIsNone(command.observed_voltage_volts)
+        self.assertTrue(args.execute)
+        self.assertTrue(args.i_am_present)
 
     def test_program_controls_cannot_build_wire_packets(self) -> None:
         with self.assertRaisesRegex(ProtocolError, "no start packet"):

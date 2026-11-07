@@ -11,9 +11,14 @@ from pathlib import Path
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ebc",
-        description="Read status from a ZKETECH EBC tester and inspect charge plans.",
+        description="Monitor a ZKETECH EBC tester, plan packets, and run supervised profiles.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    doctor = subcommands.add_parser(
+        "doctor", help="check serial permissions and visible locks without opening the port"
+    )
+    doctor.add_argument("--device", default="/dev/ttyUSB0", help="serial device path")
 
     for name, help_text in (
         ("status", "read one status frame; never changes tester mode"),
@@ -22,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
         command = subcommands.add_parser(name, help=help_text)
         command.add_argument("--device", default="/dev/ttyUSB0", help="serial device path")
         command.add_argument(
-            "--timeout", type=float, default=1.0, help="response timeout in seconds"
+            "--timeout", type=float, default=3.0, help="per-frame response timeout in seconds"
         )
         _add_log_options(command)
         if name == "monitor":
@@ -46,12 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="build a source-defined mode packet without connecting or transmitting",
     )
     mode_plan.add_argument("mode", help="source mode command, such as c_NiMH or d_CP")
-    mode_plan.add_argument("--current", type=float, help="current setpoint in amps")
-    mode_plan.add_argument("--cells", type=int, help="series cell count for chemistry charge modes")
-    mode_plan.add_argument("--voltage", type=float, help="CCCV target voltage in volts")
-    mode_plan.add_argument("--cutoff-voltage", type=float, help="discharge cutoff voltage in volts")
-    mode_plan.add_argument("--power", type=float, help="constant-power setpoint in watts")
-    mode_plan.add_argument("--resistance", type=float, help="software-CR resistance in ohms")
+    _add_mode_options(mode_plan)
     mode_plan.add_argument(
         "--observed-voltage",
         type=float,
@@ -65,6 +65,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("start", "cont", "adjust"),
         default="start",
         help="source packet phase (default: start)",
+    )
+
+    mode_run = subcommands.add_parser(
+        "run-mode",
+        help="run one source-defined tester mode under host supervision",
+    )
+    mode_run.add_argument("mode", help="mode command, such as c_Pb, c_CCCV, or d_CC")
+    _add_mode_options(mode_run)
+    mode_run.add_argument(
+        "--timeout-minutes", type=int, default=60, help="host/device timeout (default: 60)"
+    )
+    _add_device_options(mode_run)
+    mode_run.add_argument("--execute", action="store_true", help="required to transmit")
+    mode_run.add_argument(
+        "--i-am-present", action="store_true", help="required: confirm this is supervised"
     )
 
     report = subcommands.add_parser(
@@ -202,6 +217,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_device_options(stop)
     stop.add_argument("--execute", action="store_true", help="required to transmit the stop frame")
     return parser
+
+
+def _add_mode_options(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--current", type=float, help="current setpoint in amps")
+    command.add_argument("--cells", type=int, help="series cell count for chemistry charge modes")
+    command.add_argument("--voltage", type=float, help="CCCV target voltage in volts")
+    command.add_argument("--cutoff-voltage", type=float, help="discharge cutoff voltage in volts")
+    command.add_argument("--power", type=float, help="constant-power setpoint in watts")
+    command.add_argument("--resistance", type=float, help="software-CR resistance in ohms")
 
 
 def _add_device_options(command: argparse.ArgumentParser) -> None:
