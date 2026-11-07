@@ -220,7 +220,20 @@ class ProtocolTests(unittest.TestCase):
         )
 
     def test_capacity_test_requires_two_explicit_acknowledgements(self) -> None:
-        self.assertEqual(main(["capacity-test"]), 2)
+        self.assertEqual(
+            main(
+                [
+                    "capacity-test",
+                    "--current",
+                    "0.8",
+                    "--cutoff-voltage",
+                    "10.5",
+                    "--timeout-minutes",
+                    "1440",
+                ]
+            ),
+            2,
+        )
 
     def test_bulk_to_float_requires_two_explicit_acknowledgements(self) -> None:
         self.assertEqual(main(["bulk-to-float"]), 2)

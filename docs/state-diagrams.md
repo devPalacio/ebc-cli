@@ -41,6 +41,32 @@ Sampling deadlines bound status reads and sleeps. They do not preempt blocked
 terminal output, filesystem I/O, or a hung host. SIGKILL and lost power do not
 run these cleanup paths. Closing the file descriptor is not a hardware stop.
 
+## CCCV charge termination
+
+```mermaid
+stateDiagram-v2
+    [*] --> Unconfirmed: CCCV start written
+    Unconfirmed --> Unconfirmed: baseline or no active positive current
+    Unconfirmed --> Charging: post-start active positive current
+    Charging --> Tail: positive low current and target voltage window
+    Tail --> Tail: fresh qualifying samples before dwell expires
+    Tail --> Charging: rebound, voltage departure, zero, unexpected state, or gap
+    Tail --> StopAttempt: qualifying dwell complete, end-current
+    Charging --> StopAttempt: device CCCV auto-off
+    Tail --> StopAttempt: device CCCV auto-off
+    Unconfirmed --> StopAttempt: timeout, signal, or error
+    Charging --> StopAttempt: timeout, signal, or error
+    Tail --> StopAttempt: timeout, signal, or error
+    StopAttempt --> [*]: best-effort STOP and close
+```
+
+The baseline precedes START and cannot arm completion. The host checks measured
+current and voltage; termination settings are not transmitted as new packet
+fields. Device auto-off and host end-current completion have separate stop
+reasons. The tail timer resets on disqualifying samples or an excessive sample
+gap. A timeout does not prove a full charge. Lead-acid float holds do not use
+this policy.
+
 ## Bulk-to-float
 
 ```mermaid

@@ -194,19 +194,55 @@ def build_parser() -> argparse.ArgumentParser:
         "--i-am-present", action="store_true", help="required: confirm this is supervised"
     )
 
+    charge = subcommands.add_parser(
+        "charge",
+        help="run a supervised CCCV charge with a measured end-current threshold",
+    )
+    _add_device_options(charge)
+    charge.add_argument("--current", required=True, type=float, help="charge current limit in amps")
+    charge.add_argument(
+        "--voltage", required=True, type=float, help="charge target voltage in volts"
+    )
+    charge.add_argument(
+        "--end-current", required=True, type=float, help="measured end-current threshold in amps"
+    )
+    charge.add_argument(
+        "--timeout-minutes", required=True, type=int, help="positive host/device hard timeout"
+    )
+    charge.add_argument(
+        "--end-current-dwell-seconds",
+        type=float,
+        default=30,
+        help="seconds continuously at end current near target voltage (default: 30)",
+    )
+    charge.add_argument(
+        "--voltage-tolerance",
+        type=float,
+        default=0.05,
+        help="allowed distance from target voltage in volts (default: 0.05)",
+    )
+    charge.add_argument(
+        "--max-sample-gap-seconds",
+        type=float,
+        default=5,
+        help="maximum gap between dwell samples in seconds (default: 5)",
+    )
+    charge.add_argument("--execute", action="store_true", help="required to transmit")
+    charge.add_argument(
+        "--i-am-present", action="store_true", help="required: confirm this is supervised"
+    )
+
     capacity = subcommands.add_parser(
         "capacity-test",
-        help="run and automatically log a bounded 12 V lead-acid CC capacity discharge",
+        help="run and automatically log a bounded CC capacity discharge",
     )
     _add_device_options(capacity)
+    capacity.add_argument("--current", type=float, required=True, help="discharge current in amps")
     capacity.add_argument(
-        "--current", type=float, default=0.8, help="discharge current in amps (default: 0.8)"
+        "--cutoff-voltage", type=float, required=True, help="positive cutoff voltage in volts"
     )
     capacity.add_argument(
-        "--cutoff-voltage", type=float, default=10.5, help="cutoff voltage in volts (default: 10.5)"
-    )
-    capacity.add_argument(
-        "--timeout-minutes", type=int, default=1440, help="hard timeout (default: 1440)"
+        "--timeout-minutes", type=int, required=True, help="positive host/device hard timeout"
     )
     capacity.add_argument("--execute", action="store_true", help="required to transmit")
     capacity.add_argument(

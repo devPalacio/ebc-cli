@@ -32,6 +32,57 @@ run_profile(device, profile, clock=lambda: now[0], sleeper=lambda s: now.__setit
 `on_sample` is optional. Without it the function writes nothing to stdout, so
 it is safe inside a service or notebook.
 
+## Charge and capacity-test profiles
+
+Both operations use `run_profile`. Construct profiles offline with explicit
+battery-specific settings:
+
+```python
+from ebc_cli import make_charge_profile, make_capacity_test_profile
+
+# Software examples, not settings for an unidentified cell.
+charge = make_charge_profile(
+    current_amps=1.5,
+    voltage_volts=4.2,
+    end_current_amps=0.15,
+    timeout_minutes=180,
+)
+discharge = make_capacity_test_profile(
+    current_amps=0.6,
+    cutoff_volts=2.5,
+    timeout_minutes=360,
+)
+```
+
+Creating either object performs no I/O. Run each separately only after
+confirming the battery's requirements and setup. There is no automatic
+charge-rest-discharge sequence.
+
+Charge termination uses host observations, not an extra wire field. Optional
+`end_current_dwell_seconds=30`, `voltage_tolerance_volts=0.05`, and
+`max_sample_gap_seconds=5` set the observation policy. Charging must be observed
+in a post-start active sample. Positive current at or below the end-current
+threshold must then remain within the voltage window for the dwell. Rebounds,
+voltage departures, zero current, unexpected states, and observation gaps reset
+the dwell. Each call creates fresh completion state. Only streamed post-start
+observations qualify, not potentially cached CONNECT responses. Dwell timing
+uses receipt timestamps before synchronous output and logging. If output runs
+past the deadline, timeout takes precedence over completion.
+
+`SessionStopReason.END_CURRENT` records host termination.
+`SessionStopReason.MODE_AUTO_OFF` records observed device auto-off after
+charging activity, without claiming the firmware met the requested end current.
+`SessionStopReason.TIMEOUT` does not mean a completed charge or capacity test.
+The runner still attempts STOP on every normal completion or error.
+
+Capacity testing accepts the tester's setting range rather than a 12 V
+lead-acid-only range. It ends on device CC cutoff or timeout and retains the
+existing discharge accounting and logs. Requests above the load power ceiling
+at the cutoff are rejected before I/O. The device layer also checks CC current
+times baseline voltage against its registered model power limit before START.
+The reported host integral skips
+observation gaps over 30 seconds. It is not a calibration guarantee.
+
 ## Two-phase lead-acid charging
 
 ```python

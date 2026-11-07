@@ -4,14 +4,17 @@
 
 """Library entry points for running a validated profile without the CLI."""
 
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .profiles import BulkToFloatProfile, TesterProfile
+from .modes import CCCV_CHARGE
+from .profiles import BulkToFloatProfile, ProfileKind, TesterProfile
 from .protocol import EbcStatus
 from .session import (
     SessionResult,
+    SessionStopReason,
     StatusLogger,
     SupervisedSession,
     Tester,
@@ -46,7 +49,7 @@ def run_profile(
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> ProfileRun:
-    """Start ``profile`` and supervise it until cutoff or timeout.
+    """Start ``profile`` and supervise it until completion or timeout.
 
     The start frame goes out inside a ``SupervisedSession``, so every exit path
     that reaches Python attempts STOP. A caller that starts a mode directly on
@@ -57,6 +60,7 @@ def run_profile(
     ``ProtocolError`` from the tester, with STOP already attempted.
     """
 
+    completion = _charge_completion(profile, clock) if profile.kind is ProfileKind.CHARGE else None
     with SupervisedSession(tester=tester, logger=logger) as session:
         baseline = tester.begin_mode(profile.start_command)
         session.mark_started(profile.start_event)
@@ -70,11 +74,60 @@ def run_profile(
             timeout_minutes=profile.timeout_minutes,
             sample_event=profile.sample_event,
             stop_on_cutoff=profile.stop_on_cutoff,
+            completion=completion,
+            require_streamed=profile.kind is ProfileKind.CHARGE,
             poll_interval=poll_interval,
             clock=clock,
             sleeper=sleeper,
         )
     return ProfileRun(baseline=baseline, result=result)
+
+
+def _charge_completion(
+    profile: TesterProfile, clock: Callable[[], float]
+) -> Callable[[EbcStatus, int], SessionStopReason | None]:
+    assert profile.end_current_amps is not None and profile.voltage_volts is not None
+    end_current = profile.end_current_amps
+    target_voltage = profile.voltage_volts
+    # A10H active/status variants are 0x10 (a10h_live_cycles.csv) and 0x74
+    # (also captured with positive current in upstream main.lfm's console).
+    # 0x71/0x78 are command opcodes, not observed active status bytes.
+    active_states = {0x10, 0x74}
+    charging_seen = False
+    below_since: float | None = None
+    last_sample_at: float | None = None
+
+    def completion(status: EbcStatus, _samples: int) -> SessionStopReason | None:
+        nonlocal charging_seen, below_since, last_sample_at
+        now = clock()
+        if last_sample_at is not None and now - last_sample_at > profile.max_sample_gap_seconds:
+            below_since = None
+        last_sample_at = now
+
+        if charging_seen and status.state_byte == CCCV_CHARGE.auto_off_code:
+            return SessionStopReason.MODE_AUTO_OFF
+        if (
+            status.state_byte not in active_states
+            or not math.isfinite(status.current_amps)
+            or status.current_amps <= 0
+        ):
+            below_since = None
+            return None
+
+        charging_seen = True
+        if (
+            status.current_amps <= end_current
+            and abs(status.voltage_volts - target_voltage) <= profile.voltage_tolerance_volts
+        ):
+            if below_since is None:
+                below_since = now
+            if now - below_since >= profile.end_current_dwell_seconds:
+                return SessionStopReason.END_CURRENT
+        else:
+            below_since = None
+        return None
+
+    return completion
 
 
 def run_bulk_to_float(

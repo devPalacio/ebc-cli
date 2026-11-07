@@ -28,6 +28,7 @@ from .profiles import (
     TesterProfile,
     make_bulk_to_float_profile,
     make_capacity_test_profile,
+    make_charge_profile,
     make_float_charge_profile,
     make_recovery_profile,
 )
@@ -54,6 +55,7 @@ def execute_command(args: argparse.Namespace) -> int:
         "float-charge": handle_float_charge,
         "bulk-to-float": handle_bulk_to_float,
         "capacity-test": handle_capacity_test,
+        "charge": handle_charge,
         "stop": handle_stop,
         "status": handle_status,
         "monitor": handle_monitor,
@@ -119,6 +121,20 @@ def handle_bulk_to_float(args: argparse.Namespace) -> int:
         float_timeout_minutes=args.float_timeout_minutes,
     )
     return _run_bulk_to_float_profile(args, profile)
+
+
+def handle_charge(args: argparse.Namespace) -> int:
+    _require_supervised_execution(args, "charge")
+    profile = make_charge_profile(
+        current_amps=args.current,
+        voltage_volts=args.voltage,
+        end_current_amps=args.end_current,
+        timeout_minutes=args.timeout_minutes,
+        end_current_dwell_seconds=args.end_current_dwell_seconds,
+        voltage_tolerance_volts=args.voltage_tolerance,
+        max_sample_gap_seconds=args.max_sample_gap_seconds,
+    )
+    return _run_profile(args, profile)
 
 
 def handle_capacity_test(args: argparse.Namespace) -> int:
@@ -217,6 +233,7 @@ def _report_session_result(result: SessionResult) -> None:
         SessionStopReason.FLOAT_TIMEOUT: "Float hold timeout reached; stop frame sent.",
         SessionStopReason.DEVICE_CUTOFF: "Device cutoff reached; stop frame sent.",
         SessionStopReason.MODE_AUTO_OFF: "Device mode auto-off reached; stop frame sent.",
+        SessionStopReason.END_CURRENT: "End-current dwell reached near target voltage; stop frame sent.",
         SessionStopReason.ZERO_CURRENT: "Device current reached zero; stop frame sent.",
     }
     print(stop_messages[result.stop_reason], flush=True)

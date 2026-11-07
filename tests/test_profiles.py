@@ -80,7 +80,7 @@ class ProfileTests(unittest.TestCase):
             ),
             lambda: make_capacity_test_profile(
                 current_amps=0.8,
-                cutoff_volts=12.0,
+                cutoff_volts=0.0,
                 timeout_minutes=1440,
             ),
             lambda: make_bulk_to_float_profile(

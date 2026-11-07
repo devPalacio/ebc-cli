@@ -54,6 +54,7 @@ class SessionStopReason(StrEnum):
     FLOAT_TIMEOUT = "float-timeout"
     DEVICE_CUTOFF = "device-cutoff"
     MODE_AUTO_OFF = "mode-auto-off"
+    END_CURRENT = "end-current"
     ZERO_CURRENT = "zero-current"
 
 
@@ -181,8 +182,9 @@ def read_live_status(
     *,
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
+    require_streamed: bool = False,
 ) -> EbcStatus:
-    """Read the latest observation, sharing a deadline with the fallback poll."""
+    """Read the latest observation, optionally forbidding cached CONNECT polls."""
 
     def remaining() -> float | None:
         if deadline is None:
@@ -195,6 +197,9 @@ def read_live_status(
     try:
         return tester.next_status(timeout=remaining(), latest=True)
     except DeviceError:
+        if require_streamed:
+            remaining()
+            raise
         # Poll-only firmware needs CONNECT. Recompute the budget so a failed
         # streamed read cannot give the fallback another full session timeout.
         try:
@@ -212,6 +217,7 @@ def run_active_session(
     sample_event: str,
     stop_on_cutoff: bool = False,
     completion: Callable[[EbcStatus, int], SessionStopReason | None] | None = None,
+    require_streamed: bool = False,
     on_sample: Callable[[EbcStatus, int], None] | None = None,
     poll_interval: float = 1.0,
     clock: Callable[[], float] = time.monotonic,
@@ -240,7 +246,9 @@ def run_active_session(
             )
 
         try:
-            status = read_live_status(tester, deadline=deadline, clock=clock)
+            status = read_live_status(
+                tester, deadline=deadline, clock=clock, require_streamed=require_streamed
+            )
         except _ReadDeadlineReached:
             continue
         if clock() >= deadline:
@@ -248,15 +256,10 @@ def run_active_session(
         final_status = status
         sample_elapsed = clock() - session_started
         accounting.add(status, sample_elapsed)
-        printer(status)
-        if logger is not None:
-            logger.write(
-                status,
-                event=sample_event,
-                session_elapsed_seconds=sample_elapsed,
-            )
         samples += 1
 
+        # Evaluate receipt-time policies before synchronous output can distort
+        # sample gaps or dwell. The public callback still takes status/count.
         # This signal is meaningful for capacity tests; generic mode sessions
         # can supply their own source auto-off and zero-current policy.
         if completion is not None:
@@ -265,6 +268,15 @@ def run_active_session(
             completion_reason = SessionStopReason.DEVICE_CUTOFF
         else:
             completion_reason = None
+        printer(status)
+        if logger is not None:
+            logger.write(
+                status,
+                event=sample_event,
+                session_elapsed_seconds=sample_elapsed,
+            )
+        if clock() >= deadline:
+            continue
         if completion_reason is not None:
             return _finish_session(
                 session=session,

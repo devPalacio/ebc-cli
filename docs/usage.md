@@ -27,16 +27,52 @@ initial frame, which may be cached.
 
 ## Supervised profiles
 
-These defaults target six-cell, nominal 12 V lead-acid batteries. They are
-not recommendations for an unknown battery. Every live start requires
-`--execute --i-am-present`.
+Every live start requires `--execute --i-am-present`. `charge` and
+`capacity-test` require explicit battery settings; neither infers chemistry.
+Tester limits are not battery recommendations.
+
+| Command | Required settings | Completion |
+| --- | --- | --- |
+| `charge` | `--current`, `--voltage`, `--end-current`, `--timeout-minutes` | Host end-current dwell, observed device auto-off, or timeout |
+| `capacity-test` | `--current`, `--cutoff-voltage`, `--timeout-minutes` | Device CC cutoff or timeout |
+
+`capacity-test` no longer defaults to a 12 V lead-acid discharge. Existing
+scripts must supply all three settings. It accepts single-cell voltages and
+other settings within the tester envelope. Capacity settings whose current
+multiplied by cutoff exceeds the load power ceiling are rejected before I/O.
+CC discharge also checks current times observed baseline voltage before START.
+These guards do not continuously regulate power or replace hardware protection.
+A timeout is an incomplete test,
+not proof that the cell delivered its full capacity. Charge throughput is not
+discharge capacity. Charge and discharge remain separate operations and logs.
+
+`charge` sends the existing CCCV start packet. Its end-current threshold is
+host policy, not a transmitted firmware setting. The pre-start baseline does
+not prove charging began. After observed charging, the host requires positive
+current at or below `--end-current` and voltage within `--voltage-tolerance`
+of the target for `--end-current-dwell-seconds` continuously. Defaults are
+0.05 V tolerance, 30 seconds dwell, and 5 seconds maximum observation gap
+(`--max-sample-gap-seconds`). A current rebound, voltage departure, zero
+current, unexpected state, or excessive gap resets the dwell. Charge sampling
+requires streamed observations; potentially cached CONNECT replies cannot prove
+activity or completion. A failed streamed read aborts the charge and attempts
+STOP rather than falling back to CONNECT. Dwell and gap checks use receipt times before output
+and logging, and an expired deadline takes precedence over completion. These are
+sampling-policy defaults, not manufacturer limits or calibrated accuracy.
+
+Device CCCV auto-off is reported separately from host end-current completion.
+The CLI does not select the firmware's internal cutoff current. No built-in
+thermal interlock is added. Read the cell's charge and test requirements before
+choosing settings; an 18650 size alone does not establish them.
+
+The following defaults remain specific to six-cell, nominal 12 V lead-acid
+batteries. They are not recommendations for an unknown battery.
 
 | Command | Default settings | Host timeout |
 | --- | --- | --- |
 | `recover-lead-acid` | PbAc, 0.20 A | 30 minutes |
 | `float-charge` | CCCV, 13.7 V, 0.50 A | 120 minutes |
 | `bulk-to-float` | PbAc at 0.80 A, then CCCV at 13.7 V and 0.50 A | 1440 minutes bulk, 240 minutes float |
-| `capacity-test` | CC discharge, 0.80 A, 10.5 V cutoff | 1440 minutes |
 
 `recover-lead-acid` is a low-current PbAc attempt, not desulfation or a
 promise to recover a damaged battery. Float charging is a bounded hold, not

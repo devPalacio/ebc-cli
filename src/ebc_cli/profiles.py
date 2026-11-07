@@ -4,8 +4,9 @@
 
 """Typed, validated descriptions of controlled tester profiles."""
 
+import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .capabilities import A10H_CAPABILITIES, CapabilityError, EbcCapabilities
@@ -15,6 +16,7 @@ from .modes import (
     LEAD_ACID_CHARGE,
     EbcModeCommand,
 )
+from .protocol import ProtocolError
 
 
 class ProfileError(ValueError):
@@ -25,6 +27,7 @@ class ProfileKind(StrEnum):
     """The controlled operations supported by this CLI."""
 
     RECOVERY = "recovery"
+    CHARGE = "charge"
     FLOAT_CHARGE = "float-charge"
     CAPACITY_TEST = "capacity-test"
 
@@ -39,10 +42,31 @@ class TesterProfile:
     voltage_volts: float | None = None
     cutoff_volts: float | None = None
     capabilities: EbcCapabilities = A10H_CAPABILITIES
+    end_current_amps: float | None = field(default=None, kw_only=True)
+    end_current_dwell_seconds: float = field(default=30, kw_only=True)
+    voltage_tolerance_volts: float = field(default=0.05, kw_only=True)
+    max_sample_gap_seconds: float = field(default=5, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.capabilities, EbcCapabilities):
             raise ProfileError("capabilities must be an EbcCapabilities instance")
+        if self.kind is ProfileKind.CHARGE:
+            _require_positive("charge current", self.current_amps)
+            _require_positive("charge voltage", self.voltage_volts)
+            _require_positive("end current", self.end_current_amps)
+            _require_positive("end-current dwell", self.end_current_dwell_seconds)
+            _require_positive("voltage tolerance", self.voltage_tolerance_volts)
+            _require_positive("maximum sample gap", self.max_sample_gap_seconds)
+            assert self.end_current_amps is not None and self.voltage_volts is not None
+            if self.end_current_amps >= self.current_amps:
+                raise ProfileError("end current must be less than the charge current limit")
+            if self.voltage_tolerance_volts >= self.voltage_volts:
+                raise ProfileError("voltage tolerance must be less than the charge voltage target")
+            try:
+                self.start_command.validate_live(self.capabilities)
+            except ProtocolError as exc:
+                raise ProfileError(str(exc)) from exc
+            return
         if self.kind is ProfileKind.RECOVERY:
             _validate_capability(self.capabilities.validate_charge_current, self.current_amps)
             _require_range(
@@ -93,34 +117,18 @@ class TesterProfile:
             )
             return
         if self.kind is ProfileKind.CAPACITY_TEST:
-            _validate_capability(self.capabilities.validate_discharge_current, self.current_amps)
-            _validate_capability(
-                lambda value: self.capabilities.validate_voltage(value, label="cutoff voltage"),
-                self.cutoff_volts,
-            )
-            _require_range(
-                "capacity-test current",
-                self.current_amps,
-                0.1,
-                5.0,
-                "A",
-                minimum_text="0.1",
-                maximum_text="5.0",
-            )
-            _require_range(
-                "capacity-test cutoff",
-                self.cutoff_volts,
-                10.2,
-                11.5,
-                "V",
-            )
-            _require_range(
-                "capacity-test timeout",
-                self.timeout_minutes,
-                1,
-                2880,
-                "minutes",
-            )
+            _require_positive("capacity-test current", self.current_amps)
+            _require_positive("capacity-test cutoff", self.cutoff_volts)
+            try:
+                self.start_command.validate_live(self.capabilities)
+            except ProtocolError as exc:
+                raise ProfileError(str(exc)) from exc
+            assert self.cutoff_volts is not None
+            if self.current_amps * self.cutoff_volts > self.capabilities.power_max_watts:
+                raise ProfileError(
+                    "capacity-test cutoff power exceeds "
+                    f"{self.capabilities.power_max_watts:g} W discharge limit"
+                )
             return
         raise ProfileError(f"unsupported profile kind: {self.kind!r}")
 
@@ -151,7 +159,7 @@ class TesterProfile:
                 cells=6,
                 timeout_minutes=self.timeout_minutes,
             )
-        if self.kind is ProfileKind.FLOAT_CHARGE:
+        if self.kind in {ProfileKind.FLOAT_CHARGE, ProfileKind.CHARGE}:
             return EbcModeCommand(
                 CCCV_CHARGE,
                 current_amps=self.current_amps,
@@ -167,6 +175,15 @@ class TesterProfile:
 
     @property
     def summary(self) -> str:
+        if self.kind is ProfileKind.CHARGE:
+            return (
+                f"Charge started: CCCV, {self.voltage_volts:g} V target, "
+                f"{self.current_amps:g} A limit, {self.timeout_minutes}-minute hard timeout; "
+                f"end at measured current <= {self.end_current_amps:g} A within "
+                f"{self.voltage_tolerance_volts:g} V of target for "
+                f"{self.end_current_dwell_seconds:g} seconds "
+                f"(maximum sample gap {self.max_sample_gap_seconds:g} seconds)"
+            )
         if self.kind is ProfileKind.RECOVERY:
             return (
                 "Recovery started: PbAc, 6 cells, 14.4 V target, "
@@ -307,6 +324,32 @@ def make_float_charge_profile(
     )
 
 
+def make_charge_profile(
+    *,
+    current_amps: float,
+    voltage_volts: float,
+    end_current_amps: float,
+    timeout_minutes: int,
+    end_current_dwell_seconds: float = 30,
+    voltage_tolerance_volts: float = 0.05,
+    max_sample_gap_seconds: float = 5,
+    capabilities: EbcCapabilities = A10H_CAPABILITIES,
+) -> TesterProfile:
+    """Build a bounded CCCV charge with a measured, host-side end-current threshold."""
+
+    return TesterProfile(
+        ProfileKind.CHARGE,
+        current_amps,
+        timeout_minutes,
+        voltage_volts=voltage_volts,
+        capabilities=capabilities,
+        end_current_amps=end_current_amps,
+        end_current_dwell_seconds=end_current_dwell_seconds,
+        voltage_tolerance_volts=voltage_tolerance_volts,
+        max_sample_gap_seconds=max_sample_gap_seconds,
+    )
+
+
 def make_capacity_test_profile(
     *,
     current_amps: float,
@@ -342,6 +385,16 @@ def make_bulk_to_float_profile(
         float_timeout_minutes=float_timeout_minutes,
         capabilities=capabilities,
     )
+
+
+def _require_positive(label: str, value: float | None) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ProfileError(f"{label} must be finite and positive")
 
 
 def _require_range(

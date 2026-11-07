@@ -60,6 +60,23 @@ reason for each chosen value, or the missing information is named explicitly.
 ### 2. Use the smallest existing path
 
 Prefer an existing named command with explicit options when it already fits.
+Use `charge` for bounded CCCV charging with a host end-current threshold and
+`capacity-test` for a CC discharge with explicit cutoff, current, and timeout.
+Neither command infers chemistry. The capacity profile is not restricted to
+12 V lead-acid batteries; do not add cell-size-specific packet encoders.
+Keep lead-acid float holds separate from lithium charge termination.
+
+Charge end-current, voltage qualification, continuous dwell, and maximum
+observation gap are host policy. They are not extra CCCV packet fields.
+Device auto-off is a distinct outcome, not proof that the host threshold was
+met. Cite manufacturer termination requirements and choose the observation
+policy explicitly when the defaults do not fit. A timeout is not completion.
+Use streamed post-start observations, not cached CONNECT replies, as charge
+completion evidence. Measure dwell and sample gaps at receipt, before output
+or logging can delay processing. Recheck the deadline before honoring completion.
+Check discharge power as well as current and voltage; independently valid
+settings can exceed the load power ceiling when multiplied together.
+
 Use `run-mode` for a supported single operation that does not need a new
 battery-specific policy. Add Python code only for a genuinely reusable named
 recipe or a required sequence that existing commands do not express.

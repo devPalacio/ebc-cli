@@ -35,6 +35,7 @@ from .profiles import (
     TesterProfile,
     make_bulk_to_float_profile,
     make_capacity_test_profile,
+    make_charge_profile,
     make_float_charge_profile,
     make_recovery_profile,
 )
@@ -101,6 +102,7 @@ __all__ = [
     "get_operating_mode",
     "make_bulk_to_float_profile",
     "make_capacity_test_profile",
+    "make_charge_profile",
     "make_float_charge_profile",
     "make_recovery_profile",
     "register_model",

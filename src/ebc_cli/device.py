@@ -214,6 +214,16 @@ class EbcDevice:
                     f"mode {command.mode.command} is not enabled for {baseline.model_name}"
                 )
             effective = command
+            if command.mode.kind is EbcModeKind.CONSTANT_CURRENT_DISCHARGE:
+                model = self.model
+                assert model is not None and model.capabilities is not None
+                assert command.current_amps is not None
+                power = baseline.voltage_volts * command.current_amps
+                if power > model.capabilities.power_max_watts:
+                    raise DeviceError(
+                        f"discharge power at baseline ({power:g} W) exceeds "
+                        f"{model.capabilities.power_max_watts:g} W limit for {model.name}"
+                    )
             if command.mode.kind is EbcModeKind.SOFTWARE_CONSTANT_RESISTANCE:
                 effective = command.with_observed_voltage(baseline.voltage_volts)
             return build_mode_packet(
