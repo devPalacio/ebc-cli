@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jay (Python CLI contributions)
+# See NOTICE for upstream attribution and port details.
+
 """Durable CSV recording of decoded EBC status samples.
 
 The header is intentionally stable. New files add a schema-vN metadata event

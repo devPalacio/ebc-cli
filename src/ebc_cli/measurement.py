@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jay (Python CLI contributions)
+# See NOTICE for upstream attribution and port details.
+
 """Host-side integration of sampled EBC measurements.
 
 The tester reports its own capacity counter, but a host-side accumulator is

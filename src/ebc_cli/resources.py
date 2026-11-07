@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jay (Python CLI contributions)
+# See NOTICE for upstream attribution and port details.
+
 """Owned device and log resources for one CLI invocation."""
 
 from collections.abc import Iterator

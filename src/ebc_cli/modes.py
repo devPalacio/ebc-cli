@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jay (Python CLI contributions)
+# See NOTICE for upstream attribution and port details.
+
 """Source-derived operating modes for ZKETECH EBC testers.
 
 The Lazarus controller keeps its mode catalog in ``ebcc.init``.  This module

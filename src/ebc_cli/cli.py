@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jay (Python CLI contributions)
+# See NOTICE for upstream attribution and port details.
+
 """Process entry point for the ebc command."""
 
 import sys

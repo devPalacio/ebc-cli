@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jay (Python CLI contributions)
+# See NOTICE for upstream attribution and port details.
+
 """Source-compatible framing and measurement conversion for EBC testers.
 
 The EBC-controller Lazarus source uses a nine-byte command frame and a
