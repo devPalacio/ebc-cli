@@ -10,9 +10,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .capacity import CapacityPolicy, CapacityRequest
+from .device import DeviceError
 from .modes import CCCV_CHARGE
 from .profiles import BulkToFloatProfile, ProfileKind, TesterProfile
-from .protocol import EbcStatus
+from .protocol import EbcCompletionReason, EbcStatus
 from .session import (
     SessionResult,
     SessionStopReason,
@@ -25,6 +26,8 @@ from .session import (
 )
 
 __all__ = ["BulkToFloatRun", "ProfileRun", "run_bulk_to_float", "run_profile"]
+
+CAPACITY_DISCHARGE_START_TIMEOUT_SECONDS = 20.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +70,10 @@ def run_profile(
     no logger is required. Logging only adds a best-effort durable copy.
     """
 
-    completion = _charge_completion(profile, clock) if profile.kind is ProfileKind.CHARGE else None
+    completion: Callable[[EbcStatus, int], SessionStopReason | None] | None = (
+        _charge_completion(profile, clock) if profile.kind is ProfileKind.CHARGE else None
+    )
+    capacity_start_sample: Callable[[EbcStatus, int], None] | None = None
     capacity = None
     if profile.kind is ProfileKind.CAPACITY_TEST:
         assert profile.cutoff_volts is not None
@@ -79,6 +85,14 @@ def run_profile(
         with SupervisedSession(tester=tester, logger=logger) as session:
             baseline = tester.begin_mode(profile.start_command)
             started_at = clock() if capacity is not None else None
+            if capacity is not None:
+                assert started_at is not None
+                completion, capacity_start_sample = _capacity_start_watchdog(
+                    capacity,
+                    started_at,
+                    clock,
+                    stop_on_cutoff=profile.stop_on_cutoff,
+                )
             session.mark_started(profile.start_event)
             if logger is not None:
                 if capacity is not None:
@@ -93,6 +107,7 @@ def run_profile(
                 sample_event=profile.sample_event,
                 stop_on_cutoff=profile.stop_on_cutoff,
                 completion=completion,
+                on_sample=capacity_start_sample,
                 require_streamed=profile.kind is ProfileKind.CHARGE,
                 capacity_policy=capacity,
                 started_at=started_at,
@@ -106,6 +121,44 @@ def run_profile(
             _record_capacity_failure(exc, capacity, logger, clock() - started_at)
         raise
     return ProfileRun(baseline=baseline, result=result)
+
+
+def _capacity_start_watchdog(
+    policy: CapacityPolicy,
+    started_at: float,
+    clock: Callable[[], float],
+    *,
+    stop_on_cutoff: bool,
+) -> tuple[Callable[[EbcStatus, int], SessionStopReason | None], Callable[[EbcStatus, int], None]]:
+    observed_at: float | None = None
+    failure: DeviceError | None = None
+
+    def completion(status: EbcStatus, _samples: int) -> SessionStopReason | None:
+        nonlocal observed_at, failure
+        now = clock()
+        if policy.discharge_observed and observed_at is None:
+            observed_at = now
+        observed_late = (
+            observed_at is not None
+            and observed_at - started_at > CAPACITY_DISCHARGE_START_TIMEOUT_SECONDS
+        )
+        no_discharge_by_deadline = (
+            observed_at is None and now - started_at >= CAPACITY_DISCHARGE_START_TIMEOUT_SECONDS
+        )
+        if observed_late or no_discharge_by_deadline:
+            failure = DeviceError(
+                "capacity test has not observed positive current within "
+                f"{CAPACITY_DISCHARGE_START_TIMEOUT_SECONDS:g} seconds of start"
+            )
+        elif stop_on_cutoff and status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF:
+            return SessionStopReason.DEVICE_CUTOFF
+        return None
+
+    def raise_failure(_status: EbcStatus, _samples: int) -> None:
+        if failure is not None:
+            raise failure
+
+    return completion, raise_failure
 
 
 def _charge_completion(

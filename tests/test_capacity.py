@@ -166,8 +166,74 @@ class CapacityTests(unittest.TestCase):
                 (20, cutoff()),
             ]
         )
+        assert result.capacity is not None
         self.assertEqual(result.capacity.outcome, "completed")
         self.assertNotIn("load-current-mismatch", result.capacity.reasons)
+        self.assertTrue(result.capacity.discharge_observed)
+
+    def test_idle_capacity_run_fails_fast_after_no_discharge_watchdog(self):
+        tester = StreamTester(
+            self.clock,
+            [
+                (0, sample(state=0x00, current=0)),
+                (10, sample(state=0x64, current=0)),
+                (20, sample(state=0x00, current=0)),
+            ],
+        )
+        with self.assertRaisesRegex(
+            DeviceError, "capacity test has not observed positive current within 20 seconds"
+        ) as caught:
+            run_profile(
+                tester,
+                self.profile,
+                clock=self.clock,
+                sleeper=self.clock.sleep,
+            )
+        self.assertEqual(tester.stop_calls, 1)
+        assessment = getattr(caught.exception, "capacity_assessment", None)
+        self.assertIsNotNone(assessment)
+        assert assessment is not None
+        self.assertEqual(assessment.outcome, CapacityOutcome.INCOMPLETE)
+        self.assertFalse(assessment.discharge_observed)
+        self.assertIn("no-observed-discharge", assessment.reasons)
+        self.assertEqual(assessment.elapsed_seconds, 20)
+
+    def test_first_positive_capacity_sample_after_watchdog_fails(self):
+        tester = StreamTester(self.clock, [(21, sample(current=1.0))])
+        with self.assertRaisesRegex(DeviceError, "within 20 seconds of start") as caught:
+            run_profile(
+                tester,
+                self.profile,
+                clock=self.clock,
+                sleeper=self.clock.sleep,
+            )
+        self.assertEqual(tester.stop_calls, 1)
+        assessment = getattr(caught.exception, "capacity_assessment", None)
+        assert assessment is not None
+        self.assertTrue(assessment.discharge_observed)
+        self.assertEqual(assessment.outcome, CapacityOutcome.INCOMPLETE)
+        self.assertIn("error", assessment.reasons)
+
+    def test_capacity_discharge_observed_before_watchdog_continues_normally(self):
+        tester = StreamTester(
+            self.clock,
+            [
+                (0, sample(state=0x0A, current=0)),
+                (19, sample(current=1.0)),
+                (25, sample(state=0x6E, current=1.0)),
+                (30, cutoff()),
+            ],
+        )
+        result = run_profile(
+            tester,
+            self.profile,
+            clock=self.clock,
+            sleeper=self.clock.sleep,
+        ).result
+        self.assertEqual(tester.stop_calls, 1)
+        self.assertEqual(result.stop_reason, SessionStopReason.DEVICE_CUTOFF)
+        assert result.capacity is not None
+        self.assertEqual(result.capacity.outcome, CapacityOutcome.COMPLETED)
         self.assertTrue(result.capacity.discharge_observed)
 
     def test_active_states_are_real_captured_cc_states_not_opcodes(self):
@@ -191,9 +257,9 @@ class CapacityTests(unittest.TestCase):
         result = self.live(
             [
                 (0, sample(current=0)),
-                (20, sample(current=0)),
-                (40, sample(current=0)),
-                (50, sample(current=0)),
+                (10, sample(current=0)),
+                (15, sample(current=0)),
+                (19, sample(current=0)),
             ]
         )
         self.assertEqual(result.stop_reason, "timeout")
@@ -240,12 +306,28 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(result.capacity.unobserved_seconds, 35)
 
     def test_first_observation_delay_is_not_filled_from_positive_baseline(self):
-        result = self.live([(35, sample()), (45, cutoff())])
-        self.assertEqual(result.capacity.outcome, "invalid")
-        self.assertIn("first-observation-delay", result.capacity.reasons)
-        self.assertEqual(result.measurement.integrated_seconds, 10)
-        self.assertAlmostEqual(result.measurement.amp_hours, 0.001388888888888889)
-        self.assertEqual(result.capacity.unobserved_seconds, 35)
+        tester = StreamTester(self.clock, [(35, sample()), (45, cutoff())])
+        with (
+            StatusCsvLogger(self.path) as logger,
+            self.assertRaisesRegex(DeviceError, "within 20 seconds of start") as caught,
+        ):
+            run_profile(
+                tester,
+                self.profile,
+                logger=logger,
+                clock=self.clock,
+                sleeper=self.clock.sleep,
+            )
+        self.assertEqual(tester.stop_calls, 1)
+        assessment = getattr(caught.exception, "capacity_assessment", None)
+        self.assertIsNotNone(assessment)
+        assert assessment is not None
+        self.assertEqual(assessment.outcome, CapacityOutcome.INVALID)
+        self.assertIn("first-observation-delay", assessment.reasons)
+        self.assertEqual(assessment.measurement.sample_count, 1)
+        self.assertEqual(assessment.measurement.integrated_seconds, 0)
+        self.assertEqual(assessment.unobserved_seconds, 35)
+        self.assertEqual(self.replay().capacity, assessment)
 
     def test_normal_first_delay_is_disclosed_but_not_integrated(self):
         result = self.live([(2, sample()), (12, cutoff())])
@@ -525,6 +607,46 @@ class CapacityTests(unittest.TestCase):
                     self.assertEqual(main(["report", str(self.path)]), 0)
                 self.assertIn(text, report_output.getvalue())
 
+    def test_cli_capacity_start_watchdog_reports_incomplete_and_returns_error(self):
+        tester = StreamTester(
+            self.clock,
+            [
+                (0, sample(state=0x00, current=0)),
+                (10, sample(state=0x64, current=0)),
+                (20, sample(state=0x00, current=0)),
+            ],
+        )
+        with (
+            patch.object(resources, "EbcDevice", return_value=tester),
+            patch.object(
+                commands,
+                "run_profile",
+                side_effect=partial(runner.run_profile, clock=self.clock, sleeper=self.clock.sleep),
+            ),
+            contextlib.redirect_stdout(StringIO()) as output,
+            contextlib.redirect_stderr(StringIO()) as errors,
+        ):
+            code = main(
+                [
+                    "capacity-test",
+                    "--current",
+                    "1",
+                    "--cutoff-voltage",
+                    "10.5",
+                    "--timeout-minutes",
+                    "1",
+                    "--execute",
+                    "--i-am-present",
+                    "--log-dir",
+                    self.temporary.name,
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertEqual(tester.stop_calls, 1)
+        self.assertIn("Capacity test: incomplete", output.getvalue())
+        self.assertIn("no-observed-discharge", output.getvalue())
+        self.assertIn("within 20 seconds of start", errors.getvalue())
+
     def test_cli_error_and_interrupt_exit_codes_do_not_become_success(self):
         for error, expected in (
             (DeviceError("read failed"), 2),
@@ -566,12 +688,21 @@ class CapacityTests(unittest.TestCase):
                 self.assertIn("Partial:", output.getvalue())
 
     def test_baseline_output_delay_counts_against_first_observation_coverage(self):
-        result = self.live(
-            [(35, sample()), (45, cutoff())],
-            on_baseline=lambda _: self.clock.sleep(35),
-        )
-        self.assertEqual(result.capacity.outcome, "invalid")
-        self.assertIn("first-observation-delay", result.capacity.reasons)
+        tester = StreamTester(self.clock, [(35, sample()), (45, cutoff())])
+        with self.assertRaisesRegex(DeviceError, "within 20 seconds of start") as caught:
+            run_profile(
+                tester,
+                self.profile,
+                on_baseline=lambda _: self.clock.sleep(35),
+                clock=self.clock,
+                sleeper=self.clock.sleep,
+            )
+        self.assertEqual(tester.stop_calls, 1)
+        assessment = getattr(caught.exception, "capacity_assessment", None)
+        self.assertIsNotNone(assessment)
+        assert assessment is not None
+        self.assertEqual(assessment.outcome, CapacityOutcome.INVALID)
+        self.assertIn("first-observation-delay", assessment.reasons)
 
     def test_cutoff_received_at_deadline_is_not_evidence_of_completion(self):
         result = self.live([(0, sample()), (20, sample()), (40, sample()), (60, cutoff())])
