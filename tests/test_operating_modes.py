@@ -105,6 +105,20 @@ class OperatingModeCatalogTests(unittest.TestCase):
         self.assertIn("control enabled for 0x06", rendered)
         self.assertIn("No connection opened", rendered)
 
+    def test_capacity_test_default_response_timeout_matches_status_commands(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "capacity-test",
+                "--current",
+                "1.6",
+                "--cutoff-voltage",
+                "12.5",
+                "--timeout-minutes",
+                "420",
+            ]
+        )
+        self.assertEqual(args.timeout, 3.0)
+
     def test_plan_mode_builds_a_read_only_chemistry_charge_packet(self) -> None:
         output = StringIO()
         with redirect_stdout(output):

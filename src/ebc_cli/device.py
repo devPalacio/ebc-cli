@@ -42,7 +42,7 @@ class EbcDevice:
     def __init__(
         self,
         path: str | Path = "/dev/ttyUSB0",
-        timeout: float = 1.0,
+        timeout: float = 3.0,
         *,
         lock_device: bool = True,
         model: EbcModel | None = None,

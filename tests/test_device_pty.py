@@ -19,6 +19,28 @@ from ebc_cli.protocol import (
 
 
 class PtyDeviceTests(unittest.TestCase):
+    def test_default_response_timeout_allows_a_delayed_stream_frame(self) -> None:
+        status_frame = _status_frame()
+        peer_errors: queue.Queue[BaseException] = queue.Queue()
+
+        def peer() -> None:
+            try:
+                self.assertEqual(_read_exact(self.master_fd, len(CONNECT)), CONNECT)
+                time.sleep(1.5)
+                os.write(self.master_fd, status_frame)
+            except (AssertionError, EOFError, OSError, TimeoutError) as exc:
+                peer_errors.put(exc)
+
+        thread = threading.Thread(target=peer)
+        thread.start()
+        try:
+            with EbcDevice(self.slave_path) as device:
+                status = device.status()
+        finally:
+            thread.join(timeout=2.0)
+        self._assert_peer_finished(thread, peer_errors)
+        self.assertEqual(status.voltage_volts, 12.0)
+
     def test_session_budget_bounds_a_silent_serial_read(self) -> None:
         with EbcDevice(self.slave_path, timeout=10) as device:
             started = time.monotonic()

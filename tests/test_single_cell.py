@@ -875,7 +875,7 @@ class SingleCellCliTests(unittest.TestCase):
             with paths[0].open(newline="", encoding="utf-8") as stream:
                 events = [row["event"] for row in csv.DictReader(stream)]
         self.assertEqual(result, 0)
-        opened.assert_called_once_with("/dev/ttyUSB0", 1.0, lock_device=True)
+        opened.assert_called_once_with("/dev/ttyUSB0", 3.0, lock_device=True)
         self.assertEqual(tester.stop_calls, 1)
         self.assertTrue(tester.closed)
         self.assertIn(

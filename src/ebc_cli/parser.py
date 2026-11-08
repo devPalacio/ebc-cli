@@ -266,7 +266,9 @@ def _add_mode_options(command: argparse.ArgumentParser) -> None:
 
 def _add_device_options(command: argparse.ArgumentParser) -> None:
     command.add_argument("--device", default="/dev/ttyUSB0", help="serial device path")
-    command.add_argument("--timeout", type=float, default=1.0, help="response timeout in seconds")
+    command.add_argument(
+        "--timeout", type=float, default=3.0, help="per-frame response timeout in seconds"
+    )
     _add_log_options(command)
 
 
