@@ -154,6 +154,22 @@ class CapacityTests(unittest.TestCase):
         self.assertAlmostEqual(result.measurement.watt_hours, 0.05)
         self.assertEqual(result.measurement.integrated_seconds, 20)
 
+    def test_startup_zero_current_then_normal_load_completes(self):
+        self.profile = make_capacity_test_profile(
+            current_amps=1.6, cutoff_volts=10.5, timeout_minutes=1
+        )
+        result = self.live(
+            [
+                (0, sample(current=0)),
+                (1, sample(current=1.6)),
+                (10, sample(current=1.6)),
+                (20, cutoff()),
+            ]
+        )
+        self.assertEqual(result.capacity.outcome, "completed")
+        self.assertNotIn("load-current-mismatch", result.capacity.reasons)
+        self.assertTrue(result.capacity.discharge_observed)
+
     def test_active_states_are_real_captured_cc_states_not_opcodes(self):
         log = load_replay_log(FIXTURES / "a10h_live_cycles.csv")
         states = {
@@ -260,13 +276,49 @@ class CapacityTests(unittest.TestCase):
                 self.profile = make_capacity_test_profile(
                     current_amps=requested, cutoff_volts=10.5, timeout_minutes=1
                 )
-                result = self.live([(0, sample(current=observed)), (10, cutoff())])
+                result = self.live(
+                    [
+                        (0, sample(current=observed)),
+                        (1, sample(current=observed)),
+                        (2, sample(current=observed)),
+                        (10, cutoff()),
+                    ]
+                )
                 self.assertEqual(result.capacity.outcome, expected)
                 if expected == "invalid":
                     self.assertIn("load-current-mismatch", result.capacity.reasons)
 
-    def test_active_zero_after_discharge_is_bad_but_terminal_zero_is_not(self):
-        result = self.live([(0, sample()), (10, sample(current=0)), (20, cutoff())])
+    def test_isolated_active_mismatch_amid_good_samples_is_tolerated(self):
+        result = self.live([(0, sample()), (10, sample(current=0)), (20, sample()), (30, cutoff())])
+        self.assertEqual(result.capacity.outcome, "completed")
+        self.assertNotIn("load-current-mismatch", result.capacity.reasons)
+
+    def test_good_active_sample_resets_pending_mismatch_streak(self):
+        mismatch = sample(current=0.8)
+        result = self.live(
+            [
+                (0, mismatch),
+                (1, mismatch),
+                (2, sample()),
+                (3, mismatch),
+                (4, mismatch),
+                (10, cutoff()),
+            ]
+        )
+        self.assertEqual(result.capacity.outcome, "completed")
+        self.assertNotIn("load-current-mismatch", result.capacity.reasons)
+
+    def test_three_consecutive_active_mismatches_invalidate_live_and_replay(self):
+        mismatch = sample(current=0.8)
+        result = self.live(
+            [
+                (0, sample()),
+                (1, mismatch),
+                (2, mismatch),
+                (3, mismatch),
+                (10, cutoff()),
+            ]
+        )
         self.assertEqual(result.capacity.outcome, "invalid")
         self.assertEqual(result.capacity.reasons, ("load-current-mismatch",))
 
@@ -348,7 +400,8 @@ class CapacityTests(unittest.TestCase):
                 self.assertFalse(result.discharge_observed)
 
     def test_metadata_and_quality_reasons_are_durable_without_column_changes(self):
-        self.live([(0, sample(current=0.8)), (10, cutoff())])
+        mismatch = sample(current=0.8)
+        self.live([(0, mismatch), (1, mismatch), (2, mismatch), (10, cutoff())])
         with self.path.open(newline="") as stream:
             reader = csv.DictReader(stream)
             self.assertEqual(tuple(reader.fieldnames), CSV_HEADER)
@@ -419,7 +472,15 @@ class CapacityTests(unittest.TestCase):
         for observations, expected in (
             ([(0, cutoff())], "Capacity test: incomplete"),
             ([(0, sample()), (10, sample()), (20, cutoff())], "Capacity test: completed"),
-            ([(0, sample(current=0.8)), (10, cutoff())], "Capacity test: invalid"),
+            (
+                [
+                    (0, sample(current=0.8)),
+                    (1, sample(current=0.8)),
+                    (2, sample(current=0.8)),
+                    (10, cutoff()),
+                ],
+                "Capacity test: invalid",
+            ),
         ):
             with self.subTest(expected=expected):
                 self.path = self.path.with_name(expected.rsplit(" ", 1)[-1] + ".csv")
