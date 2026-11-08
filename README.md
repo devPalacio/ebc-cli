@@ -37,14 +37,57 @@ ebc plan-mode c_Pb --current 0.5 --cells 6 --timeout-minutes 60
 
 Live starts require both `--execute` and `--i-am-present`.
 
+## Quickstart
+
+These are software examples. Use the values documented for your battery. A cell
+size or a nominal voltage alone does not establish safe current, endpoint, or
+temperature limits.
+
+Charge a 4.2 V Li-ion 18650. The values below are the standard charge for a
+Samsung INR18650-30Q: 1.5 A to 4.2 V, 150 mA cut-off.
+
 ```bash
-ebc capacity-test --current 0.8 --cutoff-voltage 10.5 --timeout-minutes 120 \
+ebc charge --current 1.5 --voltage 4.2 --end-current 0.15 --timeout-minutes 180 \
   --execute --i-am-present
-ebc stop --execute
 ```
 
-Other profile commands are `recover-lead-acid`, `float-charge`, and
-`bulk-to-float`. `run-mode` exposes the source-defined device modes;
+Float-charge a 12 V lead-acid battery: CCCV hold at 13.7 V and 0.5 A. For a
+deeply discharged battery, `bulk-to-float` runs a PbAc bulk phase first.
+
+```bash
+ebc float-charge --current 0.5 --voltage 13.7 --timeout-minutes 120 \
+  --execute --i-am-present
+```
+
+Check capacity by discharging to the documented endpoint. The first command is
+the INR18650-30Q standard discharge (0.6 A to 2.5 V); the second is a 12 V
+lead-acid example.
+
+```bash
+ebc capacity-test --current 0.6 --cutoff-voltage 2.5 --timeout-minutes 360 \
+  --execute --i-am-present
+```
+
+```bash
+ebc capacity-test --current 0.8 --cutoff-voltage 10.5 --timeout-minutes 240 \
+  --execute --i-am-present
+```
+
+Charge and capacity testing are separate runs with separate logs. There is no
+built-in charge-rest-discharge sequence. The result reports whether the
+discharge was actually observed, so a cutoff alone is not a completed test.
+
+## Use
+
+```bash
+ebc status
+ebc monitor --count 3 --interval 2
+ebc modes
+ebc plan-mode c_Pb --current 0.5 --cells 6 --timeout-minutes 60
+```
+
+Other profile commands are `recover-lead-acid` and `bulk-to-float`. `run-mode`
+exposes the source-defined device modes;
 See [usage and defaults](docs/usage.md)
 and [capture evidence](docs/a10h-mode-captures.md) before live use.
 
