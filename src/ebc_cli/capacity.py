@@ -4,12 +4,13 @@
 
 """Shared live/replay capacity evidence and measurement-quality policy.
 
-This is an engineering screening policy, not a calibration guarantee. Active
-CC current must be within max(0.02 A, 5% of requested current), inclusively.
-At cutoff, that tolerance is intentionally upper-bound-only: zero and falling
-current are allowed. Terminal voltage may rebound by max(0.10 V, 5% of requested
-cutoff). A larger value flags an inconsistent measurement, not exact cutover or
-battery chemistry, and never prevents STOP.
+This is an engineering screening policy, not a calibration guarantee. Three
+consecutive active CC samples outside max(0.02 A, 5% of requested current)
+flag a load-current mismatch; an in-tolerance active sample resets the streak.
+At cutoff, the same tolerance is intentionally upper-bound-only: zero and
+falling current are allowed. Terminal voltage may rebound by max(0.10 V, 5% of
+requested cutoff). A larger value flags an inconsistent measurement, not exact
+cutover or battery chemistry, and never prevents STOP.
 The existing 30-second integration guard also bounds first-observation and
 unobserved tail delays. Shorter initial/tail delays are disclosed, never
 integrated. No baseline or CONNECT observation belongs in this policy.
@@ -27,6 +28,7 @@ REQUEST_EVENT_PREFIX = "capacity-request-v1:"
 ASSESSMENT_EVENT_PREFIX = "capacity-assessment-v1:"
 # Both carry positive discharge in tests/fixtures/a10h_live_cycles.csv.
 CC_ACTIVE_STATES = frozenset({0x0A, 0x6E})
+ACTIVE_CURRENT_MISMATCH_SAMPLES = 3
 
 
 class CapacityOutcome(StrEnum):
@@ -115,6 +117,7 @@ class CapacityPolicy:
         self._last_elapsed: float | None = None
         self._cutoff_seen = False
         self._cutoff_inconsistent = False
+        self._pending_active_mismatches = 0
 
     def flag(self, reason: str) -> None:
         if reason not in self._reasons:
@@ -131,9 +134,11 @@ class CapacityPolicy:
             or value < 0
             for value in values
         ):
+            self._pending_active_mismatches = 0
             self.flag("corrupt-measurement")
             return
         if elapsed_seconds >= self.request.timeout_minutes * 60:
+            self._pending_active_mismatches = 0
             self.flag("contradictory-capacity-evidence")
             return
         if self._cutoff_seen:
@@ -149,6 +154,7 @@ class CapacityPolicy:
         self.accounting.add(status, elapsed_seconds)
         tolerance = max(0.02, 0.05 * self.request.current_amps)
         if status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF:
+            self._pending_active_mismatches = 0
             self._cutoff_seen = True
             if status.model_id != 0x06:
                 self.flag("unrecognized-discharge-state")
@@ -161,19 +167,27 @@ class CapacityPolicy:
             ):
                 self.flag("cutoff-voltage-mismatch")
                 self._cutoff_inconsistent = True
+            if difference > tolerance and not math.isclose(
+                difference, tolerance, rel_tol=0, abs_tol=1e-12
+            ):
+                self.flag("load-current-mismatch")
+                self._cutoff_inconsistent = True
         elif status.model_id == 0x06 and status.state_byte in CC_ACTIVE_STATES:
             if status.current_amps > 0:
                 self.discharge_observed = True
             difference = abs(status.current_amps - self.request.current_amps)
+            if difference > tolerance and not math.isclose(
+                difference, tolerance, rel_tol=0, abs_tol=1e-12
+            ):
+                self._pending_active_mismatches += 1
+                if self._pending_active_mismatches >= ACTIVE_CURRENT_MISMATCH_SAMPLES:
+                    self.flag("load-current-mismatch")
+            else:
+                self._pending_active_mismatches = 0
         else:
+            self._pending_active_mismatches = 0
             self.flag("unrecognized-discharge-state")
             return
-        if difference > tolerance and not math.isclose(
-            difference, tolerance, rel_tol=0, abs_tol=1e-12
-        ):
-            self.flag("load-current-mismatch")
-            if status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF:
-                self._cutoff_inconsistent = True
 
     def assess(self, termination: str, elapsed_seconds: float) -> CapacityAssessment:
         measurement = self.accounting.summary
