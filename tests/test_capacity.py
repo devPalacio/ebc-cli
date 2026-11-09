@@ -147,12 +147,72 @@ class CapacityTests(unittest.TestCase):
 
     def test_nominal_discharge_then_zero_current_cutoff_completes(self):
         result = self.live([(0, sample()), (10, sample(state=0x6E)), (20, cutoff())])
+        assert result.capacity is not None
+        self.assertEqual(result.stop_reason, SessionStopReason.DEVICE_CUTOFF)
+        self.assertIsNotNone(result.final_status)
+        assert result.final_status is not None
+        self.assertEqual(result.final_status.state_byte, 0x14)
         self.assertEqual(result.capacity.outcome, "completed")
+        self.assertEqual(result.capacity.termination, "device-cutoff")
         self.assertEqual(result.capacity.reasons, ())
         self.assertTrue(result.capacity.discharge_observed)
         self.assertAlmostEqual(result.measurement.amp_hours, 0.004166666666666667)
         self.assertAlmostEqual(result.measurement.watt_hours, 0.05)
         self.assertEqual(result.measurement.integrated_seconds, 20)
+
+    def test_a10h_zero_current_rebound_infers_cutoff_on_confirmation_sample(self):
+        self.profile = make_capacity_test_profile(
+            current_amps=1.6, cutoff_volts=12.5, timeout_minutes=1
+        )
+        loaded_cc = sample(state=0x0A, current=1.6, voltage=12.510)
+        loaded_below_cutoff = sample(state=0x00, current=1.6, voltage=12.499)
+        idle_confirmation = sample(state=0x00, current=0, voltage=12.662)
+        observed = []
+
+        result = self.live(
+            [
+                (0, loaded_cc),
+                (10, loaded_below_cutoff),
+                (20, idle_confirmation),
+            ],
+            on_sample=lambda status: observed.append(
+                (status.state_byte, status.current_amps, status.voltage_volts)
+            ),
+        )
+
+        self.assertEqual(len(observed), 3)
+        self.assertEqual(observed[0][:2], (0x0A, 1.6))
+        self.assertAlmostEqual(observed[0][2], 12.510)
+        self.assertEqual(observed[1][:2], (0x00, 1.6))
+        self.assertAlmostEqual(observed[1][2], 12.499)
+        self.assertEqual(observed[2][:2], (0x00, 0))
+        self.assertAlmostEqual(observed[2][2], 12.662)
+        # The 12.499 V loaded sample is only a candidate. STOP follows idle confirmation.
+        replay = self.replay()
+        assert result.capacity is not None
+        self.assertEqual(result.stop_reason.value, "inferred-cutoff")
+        self.assertEqual(result.samples, 3)
+        self.assertEqual(result.final_status, idle_confirmation)
+        self.assertEqual(result.capacity.outcome, "completed")
+        self.assertEqual(result.capacity.termination, "inferred-cutoff")
+        self.assertEqual(result.capacity, replay.capacity)
+
+    def test_startup_and_isolated_idle_state_zero_do_not_infer_cutoff(self):
+        self.profile = make_capacity_test_profile(
+            current_amps=1.6, cutoff_volts=12.5, timeout_minutes=1
+        )
+        result = self.live(
+            [
+                (0, sample(state=0x00, current=0, voltage=12.499)),
+                (1, sample(state=0x0A, current=1.6, voltage=12.510)),
+                (2, sample(state=0x00, current=0, voltage=12.662)),
+            ]
+        )
+
+        assert result.capacity is not None
+        self.assertEqual(result.stop_reason, SessionStopReason.TIMEOUT)
+        self.assertNotEqual(result.capacity.outcome, "completed")
+        self.assertNotEqual(result.capacity.termination, "inferred-cutoff")
 
     def test_startup_zero_current_then_normal_load_completes(self):
         self.profile = make_capacity_test_profile(
@@ -813,6 +873,63 @@ class CapacityTests(unittest.TestCase):
                     )
                     logger.write_event("device-cutoff-stop-sent")
                 self.assertEqual(self.replay().capacity.outcome, "invalid")
+
+    def test_replay_inferred_cutoff_ignores_idle_tail_but_rejects_later_activity(self):
+        loaded_cc = sample(state=0x0A, current=1.6, voltage=12.510)
+        loaded_below_cutoff = sample(state=0x00, current=1.6, voltage=12.499)
+        idle_confirmation = sample(state=0x00, current=0, voltage=12.662)
+        observations = [
+            (0, loaded_cc),
+            (10, loaded_below_cutoff),
+            (20, idle_confirmation),
+        ]
+
+        def replay_named(name, samples):
+            path = self.path.with_name(name)
+            with StatusCsvLogger(path) as logger:
+                logger.write_event("capacity-test-started")
+                logger.write_event(CapacityRequest(1.6, 12.5, 1).event)
+                for elapsed, status in samples:
+                    logger.write(
+                        status, event="capacity-sample", session_elapsed_seconds=elapsed
+                    )
+                logger.write_event("signal-stop-sent")
+            return summarize_replay_log(load_replay_log(path))
+
+        without_tail = replay_named("inferred-cutoff.csv", observations)
+        with_idle_tail = replay_named(
+            "inferred-cutoff-idle-tail.csv",
+            observations
+            + [
+                (30, sample(state=0x00, current=0, voltage=12.650)),
+                (40, sample(state=0x00, current=0, voltage=12.640)),
+            ],
+        )
+
+        assert without_tail.capacity is not None
+        assert with_idle_tail.capacity is not None
+        self.assertEqual(with_idle_tail.stop_event, "signal-stop-sent")
+        self.assertEqual(with_idle_tail.active_sample_count, 5)
+        self.assertEqual(without_tail.capacity.outcome, "completed")
+        self.assertEqual(without_tail.capacity.termination, "inferred-cutoff")
+        self.assertEqual(with_idle_tail.capacity.outcome, "completed")
+        self.assertEqual(with_idle_tail.capacity.termination, "inferred-cutoff")
+        self.assertEqual(
+            with_idle_tail.capacity.measurement.amp_hours,
+            without_tail.capacity.measurement.amp_hours,
+        )
+        self.assertEqual(
+            with_idle_tail.capacity.measurement.watt_hours,
+            without_tail.capacity.measurement.watt_hours,
+        )
+
+        contradictory = replay_named(
+            "inferred-cutoff-contradictory.csv",
+            observations + [(30, sample(state=0x0A, current=1.6, voltage=12.640))],
+        )
+        assert contradictory.capacity is not None
+        self.assertEqual(contradictory.capacity.outcome, "invalid")
+        self.assertIn("samples-after-cutoff", contradictory.capacity.reasons)
 
     def test_start_event_with_a_frame_is_not_ordered_start_evidence(self):
         with StatusCsvLogger(self.path) as logger:
