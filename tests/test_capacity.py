@@ -34,6 +34,7 @@ from ebc_cli.capacity import (
     ASSESSMENT_EVENT_PREFIX,
     REQUEST_EVENT_PREFIX,
     CapacityPolicy,
+    CutoffKind,
     format_capacity_assessment,
 )
 from ebc_cli.cli import main
@@ -156,6 +157,15 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(result.capacity.termination, "device-cutoff")
         self.assertEqual(result.capacity.reasons, ())
         self.assertTrue(result.capacity.discharge_observed)
+        evidence = result.capacity.cutoff_evidence
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertEqual(evidence.kind, CutoffKind.EXPLICIT)
+        self.assertEqual(evidence.sample.state_byte, 0x14)
+        self.assertIn(
+            "Cutoff detection: explicit (10.500 V, 0.000 A, state 0x14)",
+            format_capacity_assessment(result.capacity),
+        )
         self.assertAlmostEqual(result.measurement.amp_hours, 0.004166666666666667)
         self.assertAlmostEqual(result.measurement.watt_hours, 0.05)
         self.assertEqual(result.measurement.integrated_seconds, 20)
@@ -195,6 +205,18 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(result.final_status, idle_confirmation)
         self.assertEqual(result.capacity.outcome, "completed")
         self.assertEqual(result.capacity.termination, "inferred-cutoff")
+        evidence = result.capacity.cutoff_evidence
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertEqual(evidence.kind, CutoffKind.INFERRED)
+        self.assertEqual(evidence.sample.elapsed_seconds, 20)
+        self.assertAlmostEqual(evidence.sample.voltage_volts, 12.662)
+        self.assertEqual(evidence.sample.current_amps, 0)
+        self.assertEqual(evidence.sample.state_byte, 0x00)
+        self.assertIn(
+            "confirming sample: 12.662 V, 0.000 A, state 0x00",
+            format_capacity_assessment(result.capacity),
+        )
         self.assertEqual(result.capacity, replay.capacity)
 
     def test_startup_and_isolated_idle_state_zero_do_not_infer_cutoff(self):
@@ -560,6 +582,8 @@ class CapacityTests(unittest.TestCase):
         final = json.loads(events[-1].removeprefix(ASSESSMENT_EVENT_PREFIX))
         self.assertEqual(final["outcome"], "invalid")
         self.assertEqual(final["reasons"], ["load-current-mismatch"])
+        self.assertEqual(final["cutoff_evidence"]["kind"], "explicit")
+        self.assertEqual(final["cutoff_evidence"]["sample"]["state_byte"], 0x14)
         self.assertGreater(final["measurement"]["amp_hours"], 0)
 
     def test_legacy_cutoff_is_unverified_not_completed(self):
@@ -611,9 +635,13 @@ class CapacityTests(unittest.TestCase):
         self.assertIn("contradictory-capacity-evidence", self.replay().capacity.reasons)
 
     def test_cli_and_replay_render_same_literal_capacity_outcomes(self):
-        for observations, expected in (
-            ([(0, cutoff())], "Capacity test: incomplete"),
-            ([(0, sample()), (10, sample()), (20, cutoff())], "Capacity test: completed"),
+        for observations, expected, stop_message in (
+            ([(0, cutoff())], "Capacity test: incomplete", None),
+            (
+                [(0, sample()), (10, sample()), (20, cutoff())],
+                "Capacity test: completed",
+                None,
+            ),
             (
                 [
                     (0, sample(current=0.8)),
@@ -622,10 +650,21 @@ class CapacityTests(unittest.TestCase):
                     (10, cutoff()),
                 ],
                 "Capacity test: invalid",
+                None,
+            ),
+            (
+                [
+                    (0, sample(state=0x0A, current=1, voltage=10.510)),
+                    (10, sample(state=0x00, current=1, voltage=10.499)),
+                    (20, sample(state=0x00, current=0, voltage=10.662)),
+                ],
+                "Capacity test: completed",
+                "Inferred cutoff confirmed; stop frame sent.",
             ),
         ):
             with self.subTest(expected=expected):
-                self.path = self.path.with_name(expected.rsplit(" ", 1)[-1] + ".csv")
+                suffix = "-inferred" if stop_message is not None else ""
+                self.path = self.path.with_name(expected.rsplit(" ", 1)[-1] + suffix + ".csv")
                 tester = StreamTester(self.clock, observations)
                 with (
                     StatusCsvLogger(self.path) as logger,
@@ -660,6 +699,8 @@ class CapacityTests(unittest.TestCase):
                     )
                 self.assertEqual(code, 0)
                 self.assertIn(expected, output.getvalue())
+                if stop_message is not None:
+                    self.assertIn(stop_message, output.getvalue())
                 assessment = self.replay().capacity
                 text = format_capacity_assessment(assessment)
                 self.assertIn(text, output.getvalue())
@@ -798,6 +839,31 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(replay.capacity.reasons, ("stop-failed",))
         self.assertGreater(replay.measurement.amp_hours, 0)
 
+    def test_failed_stop_after_inferred_cutoff_is_not_completed(self):
+        self.profile = make_capacity_test_profile(
+            current_amps=1.6, cutoff_volts=12.5, timeout_minutes=1
+        )
+        tester = StreamTester(
+            self.clock,
+            [
+                (0, sample(state=0x0A, current=1.6, voltage=12.510)),
+                (10, sample(state=0x00, current=1.6, voltage=12.499)),
+                (20, sample(state=0x00, current=0, voltage=12.662)),
+            ],
+        )
+        failure = OSError("STOP write failed")
+        tester.stop = Mock(side_effect=failure)
+        with StatusCsvLogger(self.path) as logger, self.assertRaises(OSError):
+            run_profile(
+                tester, self.profile, logger=logger, clock=self.clock, sleeper=self.clock.sleep
+            )
+        replay = self.replay()
+        assert replay.capacity is not None
+        self.assertEqual(replay.capacity.outcome, "incomplete")
+        self.assertEqual(replay.capacity.reasons, ("stop-failed",))
+        assert replay.capacity.cutoff_evidence is not None
+        self.assertEqual(replay.capacity.cutoff_evidence.kind, CutoffKind.INFERRED)
+
     def test_logger_failure_never_masks_read_error_or_prevents_stop(self):
         failure = DeviceError("serial disconnected")
         tester = StreamTester(self.clock, [(0, sample()), (10, sample()), (11, failure)])
@@ -890,9 +956,7 @@ class CapacityTests(unittest.TestCase):
                 logger.write_event("capacity-test-started")
                 logger.write_event(CapacityRequest(1.6, 12.5, 1).event)
                 for elapsed, status in samples:
-                    logger.write(
-                        status, event="capacity-sample", session_elapsed_seconds=elapsed
-                    )
+                    logger.write(status, event="capacity-sample", session_elapsed_seconds=elapsed)
                 logger.write_event("signal-stop-sent")
             return summarize_replay_log(load_replay_log(path))
 
@@ -914,6 +978,9 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(without_tail.capacity.termination, "inferred-cutoff")
         self.assertEqual(with_idle_tail.capacity.outcome, "completed")
         self.assertEqual(with_idle_tail.capacity.termination, "inferred-cutoff")
+        self.assertAlmostEqual(with_idle_tail.final_status.voltage_volts, 12.640)
+        assert with_idle_tail.capacity.cutoff_evidence is not None
+        self.assertAlmostEqual(with_idle_tail.capacity.cutoff_evidence.sample.voltage_volts, 12.662)
         self.assertEqual(
             with_idle_tail.capacity.measurement.amp_hours,
             without_tail.capacity.measurement.amp_hours,

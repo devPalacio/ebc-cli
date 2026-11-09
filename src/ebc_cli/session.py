@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, Self
 
-from .capacity import CapacityAssessment, CapacityPolicy
+from .capacity import CapacityAssessment, CapacityPolicy, CutoffKind
 from .device import DeviceError
 from .measurement import MeasurementAccumulator, MeasurementSummary
 from .modes import EbcModeCommand
@@ -54,6 +54,7 @@ class SessionStopReason(StrEnum):
     BULK_TIMEOUT = "bulk-timeout"
     FLOAT_TIMEOUT = "float-timeout"
     DEVICE_CUTOFF = "device-cutoff"
+    INFERRED_CUTOFF = "inferred-cutoff"
     MODE_AUTO_OFF = "mode-auto-off"
     END_CURRENT = "end-current"
     ZERO_CURRENT = "zero-current"
@@ -289,6 +290,13 @@ def run_active_session(
                 completion_reason = completion(status, samples)
             elif stop_on_cutoff and status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF:
                 completion_reason = SessionStopReason.DEVICE_CUTOFF
+            elif (
+                stop_on_cutoff
+                and capacity_policy is not None
+                and capacity_policy.cutoff_evidence is not None
+                and capacity_policy.cutoff_evidence.kind is CutoffKind.INFERRED
+            ):
+                completion_reason = SessionStopReason.INFERRED_CUTOFF
             else:
                 completion_reason = None
             # Capacity samples must survive an output callback interrupt/failure.

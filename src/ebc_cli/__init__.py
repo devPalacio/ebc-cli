@@ -15,7 +15,14 @@ start frame but does not guarantee a STOP frame when your code raises.
 """
 
 from .capabilities import A10H_CAPABILITIES, CapabilityError, EbcCapabilities
-from .capacity import CapacityAssessment, CapacityOutcome, CapacityRequest
+from .capacity import (
+    CapacityAssessment,
+    CapacityOutcome,
+    CapacityRequest,
+    CutoffEvidence,
+    CutoffKind,
+    CutoffSample,
+)
 from .csvlog import StatusCsvLogger
 from .device import DeviceError, EbcDevice
 from .measurement import MeasurementAccumulator, MeasurementSummary
@@ -76,6 +83,9 @@ __all__ = [
     "CapacityAssessment",
     "CapacityOutcome",
     "CapacityRequest",
+    "CutoffEvidence",
+    "CutoffKind",
+    "CutoffSample",
     "DeviceError",
     "EbcCapabilities",
     "EbcDevice",

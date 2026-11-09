@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .capacity import CapacityPolicy, CapacityRequest
+from .capacity import CapacityPolicy, CapacityRequest, CutoffKind
 from .device import DeviceError
 from .modes import CCCV_CHARGE
 from .profiles import BulkToFloatProfile, ProfileKind, TesterProfile
@@ -152,6 +152,12 @@ def _capacity_start_watchdog(
             )
         elif stop_on_cutoff and status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF:
             return SessionStopReason.DEVICE_CUTOFF
+        elif (
+            stop_on_cutoff
+            and policy.cutoff_evidence is not None
+            and policy.cutoff_evidence.kind is CutoffKind.INFERRED
+        ):
+            return SessionStopReason.INFERRED_CUTOFF
         return None
 
     def raise_failure(_status: EbcStatus, _samples: int) -> None:

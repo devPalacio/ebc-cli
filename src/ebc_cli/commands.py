@@ -248,6 +248,7 @@ def _report_session_result(result: SessionResult) -> None:
         ),
         SessionStopReason.FLOAT_TIMEOUT: "Float hold timeout reached; stop frame sent.",
         SessionStopReason.DEVICE_CUTOFF: "Device cutoff reached; stop frame sent.",
+        SessionStopReason.INFERRED_CUTOFF: "Inferred cutoff confirmed; stop frame sent.",
         SessionStopReason.MODE_AUTO_OFF: "Device mode auto-off reached; stop frame sent.",
         SessionStopReason.END_CURRENT: "End-current dwell reached near target voltage; stop frame sent.",
         SessionStopReason.ZERO_CURRENT: "Device current reached zero; stop frame sent.",

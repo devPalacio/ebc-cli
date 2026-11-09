@@ -19,6 +19,7 @@ from .capacity import (
     CapacityOutcome,
     CapacityPolicy,
     CapacityRequest,
+    CutoffKind,
     format_capacity_assessment,
 )
 from .csvlog import CSV_HEADER, CSV_SCHEMA_VERSION, schema_version_from_event
@@ -270,7 +271,14 @@ def _capacity_assessment(
             "error-stop-sent": "error",
             "timeout-stop-sent": "timeout",
             "device-cutoff-stop-sent": "device-cutoff",
+            "inferred-cutoff-stop-sent": "inferred-cutoff",
         }.get(stop, "stop-failed" if stop.endswith("-failed") else "unknown-stop")
+        if (
+            stop == "signal-stop-sent"
+            and policy.cutoff_evidence is not None
+            and policy.cutoff_evidence.kind is CutoffKind.INFERRED
+        ):
+            termination = "inferred-cutoff"
     return policy.assess(termination, elapsed)
 
 

@@ -66,6 +66,25 @@ class CapacityRequest:
             raise ValueError("invalid capacity request metadata") from exc
 
 
+class CutoffKind(StrEnum):
+    EXPLICIT = "explicit"
+    INFERRED = "inferred"
+
+
+@dataclass(frozen=True, slots=True)
+class CutoffSample:
+    elapsed_seconds: float
+    voltage_volts: float
+    current_amps: float
+    state_byte: int
+
+
+@dataclass(frozen=True, slots=True)
+class CutoffEvidence:
+    kind: CutoffKind
+    sample: CutoffSample
+
+
 @dataclass(frozen=True, slots=True)
 class CapacityAssessment:
     outcome: CapacityOutcome
@@ -76,10 +95,14 @@ class CapacityAssessment:
     elapsed_seconds: float
     request: CapacityRequest | None = None
     unobserved_seconds: float = 0.0
+    cutoff_evidence: CutoffEvidence | None = None
 
     @property
     def event(self) -> str:
-        return ASSESSMENT_EVENT_PREFIX + json.dumps(asdict(self), sort_keys=True, allow_nan=False)
+        data = asdict(self)
+        if self.cutoff_evidence is None:
+            data.pop("cutoff_evidence")
+        return ASSESSMENT_EVENT_PREFIX + json.dumps(data, sort_keys=True, allow_nan=False)
 
 
 def format_capacity_assessment(assessment: CapacityAssessment) -> str:
@@ -91,17 +114,26 @@ def format_capacity_assessment(assessment: CapacityAssessment) -> str:
         if assessment.outcome is CapacityOutcome.UNVERIFIED
         else f"Unobserved: {assessment.unobserved_seconds:.3f} s (not included in integration)"
     )
-    return "\n".join(
+    lines = [
+        f"Capacity test: {assessment.outcome.value}",
         (
-            f"Capacity test: {assessment.outcome.value}",
-            (
-                f"{label}: {assessment.measurement.amp_hours:.3f} Ah, "
-                f"{assessment.measurement.watt_hours:.3f} Wh"
-            ),
-            f"Capacity reasons: {', '.join(assessment.reasons) or 'none'}",
-            coverage,
+            f"{label}: {assessment.measurement.amp_hours:.3f} Ah, "
+            f"{assessment.measurement.watt_hours:.3f} Wh"
+        ),
+        f"Capacity reasons: {', '.join(assessment.reasons) or 'none'}",
+    ]
+    if assessment.cutoff_evidence is not None:
+        evidence = assessment.cutoff_evidence
+        sample = evidence.sample
+        detail = (
+            f"{sample.voltage_volts:.3f} V, {sample.current_amps:.3f} A, "
+            f"state 0x{sample.state_byte:02X}"
         )
-    )
+        if evidence.kind is CutoffKind.INFERRED:
+            detail = f"confirming sample: {detail}"
+        lines.append(f"Cutoff detection: {evidence.kind.value} ({detail})")
+    lines.append(coverage)
+    return "\n".join(lines)
 
 
 class CapacityPolicy:
@@ -115,9 +147,18 @@ class CapacityPolicy:
         self._last_status: EbcStatus | None = None
         self._first_elapsed: float | None = None
         self._last_elapsed: float | None = None
-        self._cutoff_seen = False
+        self._cutoff_evidence: CutoffEvidence | None = None
+        self._pending_cutoff_candidate: CutoffSample | None = None
         self._cutoff_inconsistent = False
         self._pending_active_mismatches = 0
+
+    @property
+    def cutoff_evidence(self) -> CutoffEvidence | None:
+        return self._cutoff_evidence
+
+    @property
+    def pending_cutoff_candidate(self) -> CutoffSample | None:
+        return self._pending_cutoff_candidate
 
     def flag(self, reason: str) -> None:
         if reason not in self._reasons:
@@ -137,12 +178,20 @@ class CapacityPolicy:
             self._pending_active_mismatches = 0
             self.flag("corrupt-measurement")
             return
+        tolerance = max(0.02, 0.05 * self.request.current_amps)
+        if self._cutoff_evidence is not None and self._cutoff_evidence.kind is CutoffKind.INFERRED:
+            if self._is_idle_tail(status, tolerance):
+                return
+            self.flag("samples-after-cutoff")
+            return
         if elapsed_seconds >= self.request.timeout_minutes * 60:
             self._pending_active_mismatches = 0
             self.flag("contradictory-capacity-evidence")
             return
-        if self._cutoff_seen:
+        if self._cutoff_evidence is not None:
             self.flag("samples-after-cutoff")
+        previous_status = self._last_status
+        previous_elapsed = self._last_elapsed
         self._last_status = status
         if self._first_elapsed is None:
             self._first_elapsed = elapsed_seconds
@@ -152,10 +201,12 @@ class CapacityPolicy:
             self.flag("non-increasing-observation-time")
         self._last_elapsed = max(self._last_elapsed or 0.0, elapsed_seconds)
         self.accounting.add(status, elapsed_seconds)
-        tolerance = max(0.02, 0.05 * self.request.current_amps)
         if status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF:
             self._pending_active_mismatches = 0
-            self._cutoff_seen = True
+            self._cutoff_evidence = CutoffEvidence(
+                CutoffKind.EXPLICIT, self._cutoff_sample(status, elapsed_seconds)
+            )
+            self._pending_cutoff_candidate = None
             if status.model_id != 0x06:
                 self.flag("unrecognized-discharge-state")
                 self._cutoff_inconsistent = True
@@ -172,7 +223,50 @@ class CapacityPolicy:
             ):
                 self.flag("load-current-mismatch")
                 self._cutoff_inconsistent = True
-        elif status.model_id == 0x06 and status.state_byte in CC_ACTIVE_STATES:
+            return
+
+        candidate = self._pending_cutoff_candidate
+        confirming = (
+            candidate is not None
+            and 0 < elapsed_seconds - candidate.elapsed_seconds <= DEFAULT_MAX_GAP_SECONDS
+            and status.model_id == 0x06
+            and status.state_byte == 0x00
+            and status.current_amps <= tolerance
+            and self.request.cutoff_volts
+            <= status.voltage_volts
+            <= self.request.cutoff_volts + max(0.10, 0.05 * self.request.cutoff_volts)
+        )
+        if confirming:
+            self._pending_cutoff_candidate = None
+            self._cutoff_evidence = CutoffEvidence(
+                CutoffKind.INFERRED, self._cutoff_sample(status, elapsed_seconds)
+            )
+            self._pending_active_mismatches = 0
+            return
+
+        if candidate is not None and (
+            elapsed_seconds <= candidate.elapsed_seconds
+            or elapsed_seconds - candidate.elapsed_seconds > DEFAULT_MAX_GAP_SECONDS
+        ):
+            self._pending_cutoff_candidate = None
+
+        active_cc = status.model_id == 0x06 and status.state_byte in CC_ACTIVE_STATES
+        near_request = abs(status.current_amps - self.request.current_amps) <= tolerance
+        state_zero_crossing = (
+            status.model_id == 0x06
+            and status.state_byte == 0x00
+            and near_request
+            and status.voltage_volts <= self.request.cutoff_volts
+            and previous_status is not None
+            and previous_elapsed is not None
+            and previous_status.model_id == 0x06
+            and previous_status.state_byte in CC_ACTIVE_STATES
+            and previous_status.current_amps > 0
+            and abs(previous_status.current_amps - self.request.current_amps) <= tolerance
+            and previous_status.voltage_volts > self.request.cutoff_volts
+            and 0 < elapsed_seconds - previous_elapsed <= DEFAULT_MAX_GAP_SECONDS
+        )
+        if active_cc:
             if status.current_amps > 0:
                 self.discharge_observed = True
             difference = abs(status.current_amps - self.request.current_amps)
@@ -184,10 +278,41 @@ class CapacityPolicy:
                     self.flag("load-current-mismatch")
             else:
                 self._pending_active_mismatches = 0
+            if (
+                near_request
+                and status.current_amps > 0
+                and status.voltage_volts <= self.request.cutoff_volts
+            ):
+                self._pending_cutoff_candidate = self._cutoff_sample(status, elapsed_seconds)
+            elif (
+                self._pending_cutoff_candidate is not None
+                and status.voltage_volts > self.request.cutoff_volts
+            ):
+                self._pending_cutoff_candidate = None
+        elif state_zero_crossing:
+            self._pending_active_mismatches = 0
+            self._pending_cutoff_candidate = self._cutoff_sample(status, elapsed_seconds)
         else:
             self._pending_active_mismatches = 0
             self.flag("unrecognized-discharge-state")
-            return
+
+    @staticmethod
+    def _cutoff_sample(status: EbcStatus, elapsed_seconds: float) -> CutoffSample:
+        assert status.state_byte is not None
+        return CutoffSample(
+            elapsed_seconds=elapsed_seconds,
+            voltage_volts=status.voltage_volts,
+            current_amps=status.current_amps,
+            state_byte=status.state_byte,
+        )
+
+    @staticmethod
+    def _is_idle_tail(status: EbcStatus, tolerance: float) -> bool:
+        return (
+            status.model_id == 0x06
+            and status.state_byte == 0x00
+            and status.current_amps <= tolerance
+        )
 
     def assess(self, termination: str, elapsed_seconds: float) -> CapacityAssessment:
         measurement = self.accounting.summary
@@ -198,10 +323,7 @@ class CapacityPolicy:
             reasons.append("out-of-order-observation")
         elapsed_seconds = max(elapsed_seconds, self._last_elapsed or 0.0)
         # A cutoff observation ends the measurement, not time spent printing or stopping.
-        cutoff = (
-            self._last_status is not None
-            and self._last_status.completion_reason is EbcCompletionReason.CAPACITY_CUTOFF
-        )
+        cutoff = self._cutoff_evidence is not None
         tail = 0.0 if cutoff else max(0.0, elapsed_seconds - (self._last_elapsed or 0.0))
         if tail > DEFAULT_MAX_GAP_SECONDS:
             reasons.append("last-observation-delay")
@@ -209,8 +331,14 @@ class CapacityPolicy:
         unobserved = (self._first_elapsed or 0.0) + tail + measurement.skipped_seconds
         if not self.discharge_observed:
             reasons.append("no-observed-discharge")
-        completed = cutoff and termination == "device-cutoff"
-        if termination == "device-cutoff" and not cutoff:
+        expected_termination = (
+            "inferred-cutoff"
+            if self._cutoff_evidence is not None
+            and self._cutoff_evidence.kind is CutoffKind.INFERRED
+            else "device-cutoff"
+        )
+        completed = cutoff and termination == expected_termination
+        if termination in {"device-cutoff", "inferred-cutoff"} and not cutoff:
             reasons.append("no-cutoff-observation")
         if not completed:
             reasons.append(termination)
@@ -234,4 +362,5 @@ class CapacityPolicy:
             elapsed_seconds=elapsed_seconds,
             request=self.request,
             unobserved_seconds=unobserved,
+            cutoff_evidence=self._cutoff_evidence,
         )
